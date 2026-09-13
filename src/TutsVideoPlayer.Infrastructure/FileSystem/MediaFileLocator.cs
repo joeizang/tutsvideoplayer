@@ -8,11 +8,16 @@ public sealed class MediaFileLocator
     };
 
     private readonly string _root;
+    private readonly string _containmentPrefix;
 
     public MediaFileLocator(string root)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
-        _root = Path.GetFullPath(root);
+        _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var fileSystemRoot = Path.GetPathRoot(_root);
+        _containmentPrefix = string.Equals(fileSystemRoot, _root, StringComparison.Ordinal)
+            ? _root
+            : _root + Path.DirectorySeparatorChar;
     }
 
     public bool TryResolve(string relativeName, out string fullPath)
@@ -35,12 +40,13 @@ public sealed class MediaFileLocator
         }
 
         var candidate = Path.GetFullPath(Path.Combine(_root, relativeName));
-        if (!candidate.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        if (!candidate.StartsWith(_containmentPrefix, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (!File.Exists(candidate))
+        var info = new FileInfo(candidate);
+        if (!info.Exists || info.LinkTarget is not null)
         {
             return false;
         }
