@@ -17,8 +17,8 @@ public class HomeViewTests(TestApplication application)
         Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
 
         var html = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
-        Assert.Contains("<h1>Tutorial library</h1>", html);
-        Assert.Contains("Courses</h2>", html);
+        Assert.Contains(">Tutorial library</h1>", html);
+        Assert.Contains(">Courses</h2>", html);
         Assert.Contains("CourseAlpha", html);
         Assert.Contains("CourseTS", html);
         Assert.Contains("application/json", html);

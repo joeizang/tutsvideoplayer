@@ -4,6 +4,7 @@ using TutsVideoPlayer.Infrastructure.FileSystem;
 using TutsVideoPlayer.Infrastructure.Media;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Library;
+using TutsVideoPlayer.Web.Features.Learning;
 namespace TutsVideoPlayer.Web.Hosting;
 
 public static class CatalogRegistration
@@ -24,6 +25,7 @@ public static class CatalogRegistration
         services.AddSingleton(new FFprobeAdapter(options.FFprobePath));
         services.AddScoped<DatabaseInitializer>();
         services.AddScoped<LibraryScanner>();
+        services.AddScoped<LearningService>();
         services.AddSingleton<ScanCoordinator>();
         services.AddHostedService<StartupScanService>();
         services.AddHostedService<StartupMigrationCheck>();

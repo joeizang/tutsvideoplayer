@@ -168,7 +168,7 @@ public class ScannerTests : IAsyncLifetime
         await _harness.RunScanAsync(token);
 
         Assert.False(await _harness.Context.Courses.AnyAsync(course => course.RelativeDirectory == "EmptyDirectory", token));
-        Assert.Equal(3, await _harness.Context.Courses.CountAsync(token));
+        Assert.Equal(4, await _harness.Context.Courses.CountAsync(token));
     }
 
     [Fact]
@@ -215,8 +215,11 @@ public class ScannerTests : IAsyncLifetime
         await _harness.RunScanAsync(token);
 
         Assert.True(await _harness.Context.ScanIssues.AnyAsync(issue => issue.Code == "ProbeFailed", token));
-        var anyLesson = await _harness.Context.Lessons.OrderBy(lesson => lesson.Id).FirstAsync(token);
-        Assert.Null(anyLesson.DurationMs);
+        var alphaLesson = await _harness.Context.Lessons
+            .Where(lesson => lesson.Course.RelativeDirectory == "CourseAlpha")
+            .OrderBy(lesson => lesson.Id)
+            .FirstAsync(token);
+        Assert.Null(alphaLesson.DurationMs);
     }
 
     [Fact]

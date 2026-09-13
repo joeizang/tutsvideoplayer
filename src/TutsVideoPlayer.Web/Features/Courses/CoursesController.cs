@@ -41,6 +41,11 @@ public sealed class CoursesController(AppDbContext context) : ControllerBase
                 course.Lessons.Count(),
                 course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available),
                 course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Missing),
+                course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available
+                    && context.LessonProgress.Any(progress => progress.LessonId == lesson.Id
+                        && progress.SourceGeneration == lesson.SourceGeneration
+                        && (progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
+                            || (progress.ManualCompletion == null && progress.AutomaticCompleted)))),
                 course.Availability == Core.Catalog.CatalogAvailability.Available))
             .ToListAsync(cancellationToken);
 
@@ -67,6 +72,7 @@ public sealed class CoursesController(AppDbContext context) : ControllerBase
                 folder.ParentFolderId.HasValue ? folder.ParentFolderId.Value.ToString(CultureInfo.InvariantCulture) : null,
                 null,
                 null,
+                null,
                 null))
             .ToListAsync(cancellationToken);
 
@@ -81,6 +87,10 @@ public sealed class CoursesController(AppDbContext context) : ControllerBase
                 lesson.SortKey,
                 lesson.FolderId.HasValue ? lesson.FolderId.Value.ToString(CultureInfo.InvariantCulture) : null,
                 lesson.Availability == Core.Catalog.CatalogAvailability.Available,
+                context.LessonProgress.Any(progress => progress.LessonId == lesson.Id
+                    && progress.SourceGeneration == lesson.SourceGeneration
+                    && (progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
+                        || (progress.ManualCompletion == null && progress.AutomaticCompleted))),
                 lesson.PrimaryRelativePath,
                 lesson.DurationMs))
             .ToListAsync(cancellationToken);

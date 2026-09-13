@@ -4,9 +4,23 @@ namespace TutsVideoPlayer.IntegrationTests;
 
 public static class FixtureLibraryBuilder
 {
+    private static string? FindDemoFixture() =>
+        new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "TutsVideoPlayer.Web", "Media", "demo-fixture.mp4")
+        }.FirstOrDefault(File.Exists);
+
     public static string Build(string rootDirectory)
     {
         Directory.CreateDirectory(rootDirectory);
+
+        var demoFixture = FindDemoFixture();
+        if (demoFixture is not null)
+        {
+            var realCourse = Path.Combine(rootDirectory, "RealCourse");
+            Directory.CreateDirectory(realCourse);
+            File.Copy(demoFixture, Path.Combine(realCourse, "01 Real Lesson.mp4"));
+        }
 
         var alpha = Path.Combine(rootDirectory, "CourseAlpha");
         WriteFile(Path.Combine(alpha, "01 Intro", "02 Getting Started.mp4"), [1, 2, 3, 4]);

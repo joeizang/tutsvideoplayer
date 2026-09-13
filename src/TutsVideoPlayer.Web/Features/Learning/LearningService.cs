@@ -1,0 +1,524 @@
+using System.Globalization;
+using Microsoft.EntityFrameworkCore;
+using TutsVideoPlayer.Core.Catalog;
+using TutsVideoPlayer.Core.Learning;
+using TutsVideoPlayer.Infrastructure.Persistence;
+using TutsVideoPlayer.Infrastructure.Persistence.Entities;
+using TutsVideoPlayer.Web.Models;
+
+namespace TutsVideoPlayer.Web.Features.Learning;
+
+public sealed class LearningService(AppDbContext context)
+{
+    public const int HeartbeatIntervalMs = 10_000;
+    private const double CompletionThreshold = 0.95;
+
+    public async Task<PlaybackManifestModel> BuildManifestAsync(long lessonId, CancellationToken cancellationToken)
+    {
+        var lesson = await context.Lessons.AsNoTracking()
+            .Where(candidate => candidate.Id == lessonId)
+            .Select(candidate => new
+            {
+                candidate.Id,
+                candidate.SourceGeneration,
+                candidate.DurationMs,
+                candidate.Availability
+            })
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Lesson not found.");
+
+        var progress = await context.LessonProgress.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.LessonId == lessonId && candidate.SourceGeneration == lesson.SourceGeneration, cancellationToken);
+
+        var renditions = await context.Renditions.AsNoTracking()
+            .Where(rendition => rendition.LessonId == lessonId && rendition.SourceGeneration == lesson.SourceGeneration)
+            .OrderByDescending(rendition => rendition.Height ?? 0)
+            .ToListAsync(cancellationToken);
+
+        var preferences = await EnsurePreferencesAsync(cancellationToken);
+
+        var renditionModels = renditions
+            .Select(rendition => new RenditionModel(
+                rendition.Id.ToString(CultureInfo.InvariantCulture),
+                RenditionLabel(rendition),
+                rendition.Width,
+                rendition.Height,
+                MediaMimeType(rendition.RelativePath),
+                rendition.VideoCodec is null ? null : $"{rendition.VideoCodec}{(rendition.AudioCodec is null ? "" : $" + {rendition.AudioCodec}")}",
+                rendition.Status.ToString(),
+                rendition.RetentionClass.ToString(),
+                rendition.Status == RenditionStatus.Ready
+                    ? $"/media/renditions/{rendition.Id.ToString(CultureInfo.InvariantCulture)}"
+                    : null))
+            .ToList();
+
+        var readyDefault = renditions
+            .Where(rendition => rendition.Status == RenditionStatus.Ready)
+            .OrderByDescending(rendition => rendition.Height ?? 0)
+            .FirstOrDefault();
+
+        var effective = progress is null
+            ? false
+            : CompletionResolver.IsEffectivelyComplete(progress.AutomaticCompleted, progress.ManualCompletion);
+
+        return new PlaybackManifestModel(
+            lesson.Id.ToString(CultureInfo.InvariantCulture),
+            lesson.SourceGeneration,
+            lesson.DurationMs,
+            progress?.Revision ?? 0,
+            new ProgressStateModel(
+                progress?.PositionMs ?? 0,
+                effective,
+                progress?.ManualCompletion?.ToString(),
+                progress?.Revision ?? 0),
+            renditionModels,
+            readyDefault is null ? null : readyDefault.Id.ToString(CultureInfo.InvariantCulture),
+            new PlaybackPreferencesModel(preferences.PlaybackSpeed, preferences.Autoplay, preferences.FitMode));
+    }
+
+    public async Task<PlaybackSessionStartModel> StartSessionAsync(long lessonId, CancellationToken cancellationToken)
+    {
+        var lesson = await context.Lessons
+            .Include(candidate => candidate.SourceComponents)
+            .SingleOrDefaultAsync(candidate => candidate.Id == lessonId, cancellationToken)
+            ?? throw new InvalidOperationException("Lesson not found.");
+
+        var progress = await GetOrStartProgressAsync(lesson, cancellationToken);
+
+        var session = new PlaybackSessionEntity
+        {
+            LessonId = lesson.Id,
+            SourceGeneration = lesson.SourceGeneration,
+            StartedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+        context.PlaybackSessions.Add(session);
+        await context.SaveChangesAsync(cancellationToken);
+
+        progress.ActiveSessionId = session.Id;
+        progress.Revision++;
+        await TouchSourceAccessAsync(lesson.Id, lesson.SourceGeneration, cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+
+        return new PlaybackSessionStartModel(
+            session.Id.ToString(CultureInfo.InvariantCulture),
+            progress.Revision,
+            progress.PositionMs,
+            progress.LastSequence,
+            HeartbeatIntervalMs);
+    }
+
+    public async Task<HeartbeatResultModel> HeartbeatAsync(long sessionId, long? activeRenditionId, CancellationToken cancellationToken)
+    {
+        var session = await context.PlaybackSessions
+            .SingleOrDefaultAsync(candidate => candidate.Id == sessionId, cancellationToken)
+            ?? throw new InvalidOperationException("Session not found.");
+
+        if (session.ClosedUtcMs is not null)
+        {
+            throw new InvalidOperationException("Session is closed.");
+        }
+
+        session.LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        if (activeRenditionId.HasValue && session.ActiveRenditionId != activeRenditionId.Value)
+        {
+            session.ActiveRenditionId = activeRenditionId.Value;
+            var rendition = await context.Renditions
+                .SingleOrDefaultAsync(candidate => candidate.Id == activeRenditionId.Value, cancellationToken);
+            if (rendition is not null)
+            {
+                rendition.LastAccessUtcMs = session.LastHeartbeatUtcMs;
+            }
+        }
+
+        await context.SaveChangesAsync(cancellationToken);
+        return new HeartbeatResultModel(true, session.LastHeartbeatUtcMs);
+    }
+
+    public sealed record ProgressOutcome(long AcceptedPositionMs, bool EffectiveCompletion, int Revision, bool Duplicate);
+
+    public async Task<ProgressOutcome> WriteProgressAsync(
+        long sessionId,
+        ProgressWriteModel command,
+        CancellationToken cancellationToken)
+    {
+        var session = await LoadSessionWithLessonAsync(sessionId, cancellationToken)
+            ?? throw new InvalidOperationException("Session not found.");
+
+        var lesson = session.Lesson;
+        ValidateSessionUsable(session, lesson.SourceGeneration, command.SourceGeneration);
+
+        var progress = await context.LessonProgress
+            .SingleAsync(candidate => candidate.LessonId == lesson.Id && candidate.SourceGeneration == lesson.SourceGeneration, cancellationToken);
+
+        if (progress.ActiveSessionId != sessionId)
+        {
+            throw new SessionOwnershipException("Another playback session owns this lesson's progress.");
+        }
+
+        if (command.Sequence == progress.LastSequence)
+        {
+            return new ProgressOutcome(progress.PositionMs, EffectiveCompletion(progress), progress.Revision, Duplicate: true);
+        }
+
+        if (command.Sequence < progress.LastSequence)
+        {
+            throw new SessionOwnershipException("A newer progress write already superseded this sequence.");
+        }
+
+        var clamped = ClampPosition(command.PositionMs, lesson.DurationMs);
+        progress.PositionMs = clamped;
+        progress.MaxObservedPositionMs = Math.Max(progress.MaxObservedPositionMs, clamped);
+        progress.LastSequence = command.Sequence;
+        progress.LastWatchedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        progress.Revision++;
+
+        if (command.Ended
+            || (command.IsPlaying && lesson.DurationMs is > 0 && clamped >= (long)(lesson.DurationMs.Value * CompletionThreshold)))
+        {
+            progress.AutomaticCompleted = true;
+        }
+
+        await context.SaveChangesAsync(cancellationToken);
+        return new ProgressOutcome(progress.PositionMs, EffectiveCompletion(progress), progress.Revision, Duplicate: false);
+    }
+
+    public sealed record CloseOutcome(bool Closed, bool ProgressFlushed);
+
+    public async Task<CloseOutcome> CloseSessionAsync(
+        long sessionId,
+        SessionCloseModel? final,
+        CancellationToken cancellationToken)
+    {
+        var session = await LoadSessionWithLessonAsync(sessionId, cancellationToken)
+            ?? throw new InvalidOperationException("Session not found.");
+
+        if (session.ClosedUtcMs is not null)
+        {
+            return new CloseOutcome(Closed: true, ProgressFlushed: false);
+        }
+
+        var lesson = session.Lesson;
+        var progress = await context.LessonProgress
+            .SingleOrDefaultAsync(candidate => candidate.LessonId == lesson.Id && candidate.SourceGeneration == lesson.SourceGeneration, cancellationToken);
+
+        var flushed = false;
+        if (progress is not null
+            && progress.ActiveSessionId == sessionId
+            && final?.Sequence is not null
+            && final.PositionMs is not null
+            && final.Sequence.Value > progress.LastSequence)
+        {
+            progress.PositionMs = ClampPosition(final.PositionMs.Value, lesson.DurationMs);
+            progress.MaxObservedPositionMs = Math.Max(progress.MaxObservedPositionMs, progress.PositionMs);
+            progress.LastSequence = final.Sequence.Value;
+            progress.LastWatchedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            progress.Revision++;
+            flushed = true;
+        }
+
+        if (progress is not null && progress.ActiveSessionId == sessionId)
+        {
+            progress.ActiveSessionId = null;
+            progress.Revision++;
+        }
+
+        session.ClosedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await context.SaveChangesAsync(cancellationToken);
+        return new CloseOutcome(Closed: true, ProgressFlushed: flushed);
+    }
+
+    public async Task<CompletionResultModel> SetCompletionAsync(
+        long lessonId,
+        CompletionChoice choice,
+        int? ifMatchRevision,
+        CancellationToken cancellationToken)
+    {
+        var lesson = await context.Lessons
+            .SingleOrDefaultAsync(candidate => candidate.Id == lessonId, cancellationToken)
+            ?? throw new InvalidOperationException("Lesson not found.");
+
+        var progress = await GetOrStartProgressAsync(lesson, cancellationToken);
+
+        if (ifMatchRevision.HasValue && ifMatchRevision.Value != progress.Revision)
+        {
+            throw new RevisionConflictException(progress.Revision);
+        }
+
+        progress.ManualCompletion = choice switch
+        {
+            CompletionChoice.Automatic => null,
+            CompletionChoice.Completed => CompletionChoice.Completed,
+            CompletionChoice.Incomplete => CompletionChoice.Incomplete,
+            _ => progress.ManualCompletion
+        };
+        progress.Revision++;
+        await context.SaveChangesAsync(cancellationToken);
+
+        return new CompletionResultModel(
+            choice.ToString(),
+            EffectiveCompletion(progress),
+            progress.Revision);
+    }
+
+    public async Task<IReadOnlyList<ContinueLearningEntryModel>> ContinueLearningAsync(int take, CancellationToken cancellationToken)
+    {
+        var rows = await context.LessonProgress.AsNoTracking()
+            .Where(candidate => candidate.LastWatchedUtcMs > 0)
+            .OrderByDescending(candidate => candidate.LastWatchedUtcMs)
+            .Select(candidate => new
+            {
+                candidate.LessonId,
+                candidate.PositionMs,
+                candidate.AutomaticCompleted,
+                candidate.ManualCompletion,
+                LastWatchedUtcMs = candidate.LastWatchedUtcMs,
+                LessonTitle = candidate.Lesson.Title,
+                LessonSortKey = candidate.Lesson.SortKey,
+                LessonDurationMs = candidate.Lesson.DurationMs,
+                LessonAvailable = candidate.Lesson.Availability == CatalogAvailability.Available,
+                CourseId = candidate.Lesson.Course.Id,
+                CourseTitle = candidate.Lesson.Course.DisplayTitle
+            })
+            .ToListAsync(cancellationToken);
+
+        var continueEntries = new List<ContinueLearningEntryModel>();
+        var seenCourses = new HashSet<long>();
+        var courseIds = rows.Select(row => row.CourseId).Distinct().ToList();
+        var courseLessons = await context.Lessons.AsNoTracking()
+            .Where(lesson => courseIds.Contains(lesson.CourseId) && lesson.Availability == CatalogAvailability.Available)
+            .OrderBy(lesson => lesson.SortKey)
+            .ThenBy(lesson => lesson.Id)
+            .Select(lesson => new
+            {
+                lesson.Id,
+                lesson.CourseId,
+                Completed = context.LessonProgress.Any(progress =>
+                    progress.LessonId == lesson.Id
+                    && progress.SourceGeneration == lesson.SourceGeneration
+                    && (progress.ManualCompletion == CompletionChoice.Completed
+                        || (progress.ManualCompletion == null && progress.AutomaticCompleted)))
+            })
+            .ToListAsync(cancellationToken);
+
+        foreach (var row in rows)
+        {
+            if (!seenCourses.Add(row.CourseId))
+            {
+                continue;
+            }
+
+            var lessons = courseLessons.Where(lesson => lesson.CourseId == row.CourseId).ToList();
+            var effectivelyComplete = CompletionResolver.IsEffectivelyComplete(row.AutomaticCompleted, row.ManualCompletion);
+
+            string recommendedLessonId;
+            string recommendation;
+            if (effectivelyComplete)
+            {
+                var next = lessons.FirstOrDefault(lesson => !lesson.Completed);
+                if (next is null)
+                {
+                    recommendedLessonId = lessons.FirstOrDefault()?.Id.ToString(CultureInfo.InvariantCulture) ?? row.LessonId.ToString(CultureInfo.InvariantCulture);
+                    recommendation = "replay";
+                }
+                else
+                {
+                    recommendedLessonId = next.Id.ToString(CultureInfo.InvariantCulture);
+                    recommendation = "next";
+                }
+            }
+            else
+            {
+                recommendedLessonId = row.LessonId.ToString(CultureInfo.InvariantCulture);
+                recommendation = "resume";
+            }
+
+            continueEntries.Add(new ContinueLearningEntryModel(
+                row.CourseId.ToString(CultureInfo.InvariantCulture),
+                row.CourseTitle,
+                row.LessonId.ToString(CultureInfo.InvariantCulture),
+                row.LessonTitle,
+                row.PositionMs,
+                row.LessonDurationMs,
+                lessons.Count(lesson => lesson.Completed),
+                lessons.Count,
+                recommendedLessonId,
+                recommendation));
+
+            if (continueEntries.Count >= take)
+            {
+                break;
+            }
+        }
+
+        return continueEntries;
+    }
+
+    public async Task<SettingsModel> GetSettingsAsync(CancellationToken cancellationToken)
+    {
+        var preferences = await EnsurePreferencesAsync(cancellationToken);
+        return new SettingsModel(
+            preferences.PlaybackSpeed,
+            preferences.Autoplay,
+            preferences.FitMode,
+            preferences.SubtitleEnabled,
+            preferences.Revision);
+    }
+
+    public async Task<SettingsModel> UpdateSettingsAsync(
+        SettingsUpdateModel update,
+        int? ifMatchRevision,
+        CancellationToken cancellationToken)
+    {
+        if (update.PlaybackSpeed.HasValue && !PlaybackSpeeds.IsAllowed(update.PlaybackSpeed.Value))
+        {
+            throw new ArgumentException("Playback speed must be one of 0.5, 0.75, 1, 1.25, 1.5, 1.75, or 2.");
+        }
+
+        if (update.FitMode is not null && update.FitMode is not ("Contain" or "Fill"))
+        {
+            throw new ArgumentException("Fit mode must be Contain or Fill.");
+        }
+
+        var preferences = await EnsurePreferencesAsync(cancellationToken);
+        if (ifMatchRevision.HasValue && ifMatchRevision.Value != preferences.Revision)
+        {
+            throw new RevisionConflictException(preferences.Revision);
+        }
+
+        if (update.PlaybackSpeed.HasValue)
+        {
+            preferences.PlaybackSpeed = update.PlaybackSpeed.Value;
+        }
+
+        if (update.Autoplay.HasValue)
+        {
+            preferences.Autoplay = update.Autoplay.Value;
+        }
+
+        if (update.FitMode is not null)
+        {
+            preferences.FitMode = update.FitMode;
+        }
+
+        if (update.SubtitleEnabled.HasValue)
+        {
+            preferences.SubtitleEnabled = update.SubtitleEnabled.Value;
+        }
+
+        preferences.Revision++;
+        await context.SaveChangesAsync(cancellationToken);
+
+        return new SettingsModel(
+            preferences.PlaybackSpeed,
+            preferences.Autoplay,
+            preferences.FitMode,
+            preferences.SubtitleEnabled,
+            preferences.Revision);
+    }
+
+    private async Task<LessonProgressEntity> GetOrStartProgressAsync(LessonEntity lesson, CancellationToken cancellationToken)
+    {
+        var progress = await context.LessonProgress
+            .SingleOrDefaultAsync(candidate => candidate.LessonId == lesson.Id && candidate.SourceGeneration == lesson.SourceGeneration, cancellationToken);
+
+        if (progress is null)
+        {
+            progress = new LessonProgressEntity
+            {
+                LessonId = lesson.Id,
+                SourceGeneration = lesson.SourceGeneration
+            };
+            context.LessonProgress.Add(progress);
+            await context.SaveChangesAsync(cancellationToken);
+        }
+
+        return progress;
+    }
+
+    private async Task<PreferenceEntity> EnsurePreferencesAsync(CancellationToken cancellationToken)
+    {
+        var preferences = await context.Preferences.SingleOrDefaultAsync(cancellationToken);
+        if (preferences is null)
+        {
+            preferences = new PreferenceEntity();
+            context.Preferences.Add(preferences);
+            await context.SaveChangesAsync(cancellationToken);
+        }
+
+        return preferences;
+    }
+
+    private async Task<PlaybackSessionEntity?> LoadSessionWithLessonAsync(long sessionId, CancellationToken cancellationToken) =>
+        await context.PlaybackSessions
+            .Include(session => session.Lesson)
+            .SingleOrDefaultAsync(candidate => candidate.Id == sessionId, cancellationToken);
+
+    private static void ValidateSessionUsable(PlaybackSessionEntity session, int lessonGeneration, int commandGeneration)
+    {
+        if (session.ClosedUtcMs is not null)
+        {
+            throw new SessionOwnershipException("This playback session is closed.");
+        }
+
+        if (lessonGeneration != commandGeneration)
+        {
+            throw new SessionOwnershipException("The lesson source changed since this session started.");
+        }
+    }
+
+    private static long ClampPosition(long positionMs, long? durationMs)
+    {
+        var clamped = Math.Max(0, positionMs);
+        if (durationMs is > 0)
+        {
+            clamped = Math.Min(clamped, durationMs.Value);
+        }
+
+        return clamped;
+    }
+
+    private static bool EffectiveCompletion(LessonProgressEntity progress) =>
+        CompletionResolver.IsEffectivelyComplete(progress.AutomaticCompleted, progress.ManualCompletion);
+
+    private async Task TouchSourceAccessAsync(long lessonId, int sourceGeneration, CancellationToken cancellationToken)
+    {
+        var renditions = await context.Renditions
+            .Where(rendition => rendition.LessonId == lessonId && rendition.SourceGeneration == sourceGeneration)
+            .ToListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var rendition in renditions)
+        {
+            rendition.LastAccessUtcMs = now;
+        }
+    }
+
+    private static string RenditionLabel(RenditionEntity rendition) =>
+        rendition.Purpose switch
+        {
+            RenditionPurpose.Source when rendition.Width is not null && rendition.Height is not null
+                => $"Original ({rendition.Width}×{rendition.Height})",
+            RenditionPurpose.Source => "Original",
+            RenditionPurpose.Compatibility => "Playback copy",
+            RenditionPurpose.Quality => rendition.Profile ?? "Quality version",
+            _ => "Rendition"
+        };
+
+    private static string MediaMimeType(string relativePath) => Path.GetExtension(relativePath).ToLowerInvariant() switch
+    {
+        ".mp4" or ".m4v" => "video/mp4",
+        ".mkv" => "video/x-matroska",
+        ".webm" => "video/webm",
+        ".mov" => "video/quicktime",
+        _ => "application/octet-stream"
+    };
+}
+
+public sealed class SessionOwnershipException(string message) : InvalidOperationException(message);
+
+public sealed class RevisionConflictException(int currentRevision)
+    : InvalidOperationException($"The resource changed concurrently; current revision is {currentRevision}.")
+{
+    public int CurrentRevision { get; } = currentRevision;
+}

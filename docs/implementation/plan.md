@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestones 0 and 1 executed on 2026-09-13 with explicit user authorization; milestones M2–M7 remain planned. Every M2+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0–2 executed on 2026-09-13 with explicit user authorization; milestones M3–M7 remain planned. Every M3+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -56,16 +56,20 @@ Post-review corrections (PR #2 review, [m1-library-review.md](../m1-library-revi
 
 Dependencies: M1.
 
-- [ ] Implement ready source rendition metadata and safe seekable file delivery with GET/HEAD/ranges.
-- [ ] Build player controls, aspect fit/fill, speed, skips, previous/next, and optional autoplay.
-- [ ] Implement LessonProgress behavior with automatic/manual completion and source generation.
-- [ ] Add playback session ownership, monotonic sequence acceptance, revisions, and lease heartbeat.
-- [ ] Save position periodically and on relevant player events; show unsaved state on write failure.
-- [ ] Implement Continue learning and completed-course replay behavior.
-- [ ] Preserve playback state when navigating, buffering, or rejecting autoplay.
-- [ ] Add race tests for delayed tab writes and completion overrides.
+Evidence (2026-09-13): all items below completed. The `PlaybackAndProgress` migration adds LessonProgress, PlaybackSessions, Renditions, and Preferences; the interface was rebuilt with Tailwind CSS 4 (committed generated stylesheet, no CDN).
+
+- [x] Implement ready source rendition metadata and safe seekable file delivery with GET/HEAD/ranges.
+- [x] Build player controls, aspect fit/fill, speed, skips, previous/next, and optional autoplay.
+- [x] Implement LessonProgress behavior with automatic/manual completion and source generation.
+- [x] Add playback session ownership, monotonic sequence acceptance, revisions, and lease heartbeat.
+- [x] Save position periodically and on relevant player events; show unsaved state on write failure.
+- [x] Implement Continue learning and completed-course replay behavior.
+- [x] Preserve playback state when navigating, buffering, or rejecting autoplay.
+- [x] Add race tests for delayed tab writes and completion overrides.
 
 Exit evidence: watch/pause/restart/resume flow, backward-seek persistence, manual incomplete preserved, multiple-tab stale-write rejection, bounded memory for media delivery, keyboard operation.
+
+Recorded results: browser-verified against the real library — playback, backward seek with position restore at 12.443 s after reload, ended/95% completion, manual incomplete surviving an ended signal, and the Continue learning shelf recommending next/replay. Integration tests cover stale-session rejection (409), duplicate sequence acknowledgement, close idempotency, If-Match completion conflicts (412), ready/stale rendition gating, and range delivery through `/media/renditions/{id}`; delivery streams via framework file results without full-file buffering.
 
 ## M3: Subtitle discovery and selection
 

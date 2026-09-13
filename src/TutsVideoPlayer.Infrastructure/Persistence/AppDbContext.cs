@@ -14,6 +14,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<SubtitleTrackEntity> SubtitleTracks => Set<SubtitleTrackEntity>();
     public DbSet<ScanRunEntity> ScanRuns => Set<ScanRunEntity>();
     public DbSet<ScanIssueEntity> ScanIssues => Set<ScanIssueEntity>();
+    public DbSet<LessonProgressEntity> LessonProgress => Set<LessonProgressEntity>();
+    public DbSet<PlaybackSessionEntity> PlaybackSessions => Set<PlaybackSessionEntity>();
+    public DbSet<RenditionEntity> Renditions => Set<RenditionEntity>();
+    public DbSet<PreferenceEntity> Preferences => Set<PreferenceEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

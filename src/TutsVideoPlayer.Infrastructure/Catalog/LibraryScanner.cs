@@ -48,6 +48,7 @@ public sealed class LibraryScanner(
 
             await ReconcileCoursesAndFoldersAsync(library.Id, scanRunId, discovered, existing, cancellationToken);
             var (availableCount, missingCount) = await ReconcileLessonsAsync(scanRunId, discovered, existing, enumeration, cancellationToken);
+            await ReconcileSourceRenditionsAsync(library.Id, discovered, existing.LessonsByPath.Values.ToList(), cancellationToken);
             await ReconcileSubtitlesAsync(scanRunId, discovered, existing, enumeration, cancellationToken);
             await ReconcileCourseAvailabilityAsync(library.Id, cancellationToken);
 
@@ -564,6 +565,119 @@ public sealed class LibraryScanner(
         await context.SaveChangesAsync(cancellationToken);
         return (availableCount, missingCount);
     }
+
+    private async Task ReconcileSourceRenditionsAsync(long libraryId, Discovery discovered, IReadOnlyList<LessonEntity> lessons, CancellationToken cancellationToken)
+    {
+        var renditions = await context.Renditions
+            .Where(rendition => rendition.Lesson.Course.LibraryId == libraryId && rendition.Purpose == RenditionPurpose.Source)
+            .ToListAsync(cancellationToken);
+        var byKey = renditions.ToDictionary(rendition => (rendition.LessonId, rendition.SourceGeneration));
+
+        foreach (var lesson in lessons)
+        {
+            var videoComponent = lesson.SourceComponents.FirstOrDefault(component =>
+                component.Generation == lesson.SourceGeneration && component.Role == SourceComponentRole.Video);
+            if (videoComponent is null)
+            {
+                continue;
+            }
+
+            var probedThisScan = discovered.Lessons.GetValueOrDefault(lesson.PrimaryRelativePath)?.Probe;
+            var probe = probedThisScan is not null
+                ? new ProbeMetadata(probedThisScan.DurationMs, probedThisScan.VideoCodec, probedThisScan.AudioCodec, probedThisScan.Width, probedThisScan.Height)
+                : ParseProbeMetadata(videoComponent.ProbeMetadata);
+
+            var containerCompatible = IsBrowserCompatibleContainer(lesson.PrimaryRelativePath);
+            var status = !containerCompatible
+                ? RenditionStatus.Pending
+                : probe is not null
+                    ? RenditionStatus.Ready
+                    : RenditionStatus.Stale;
+
+            if (!byKey.TryGetValue((lesson.Id, lesson.SourceGeneration), out var rendition))
+            {
+                rendition = new RenditionEntity
+                {
+                    LessonId = lesson.Id,
+                    SourceGeneration = lesson.SourceGeneration,
+                    Purpose = RenditionPurpose.Source,
+                    RetentionClass = RenditionRetention.Source,
+                    RelativePath = videoComponent.RelativePath
+                };
+                context.Renditions.Add(rendition);
+                byKey[(lesson.Id, lesson.SourceGeneration)] = rendition;
+            }
+
+            if (rendition.Status == RenditionStatus.Ready && status != RenditionStatus.Ready)
+            {
+                rendition.Revision++;
+            }
+
+            rendition.Status = lesson.Availability == CatalogAvailability.Missing
+                ? RenditionStatus.Missing
+                : status;
+            rendition.ByteLength = videoComponent.LengthBytes;
+            rendition.Width = probe?.Width;
+            rendition.Height = probe?.Height;
+            rendition.VideoCodec = probe?.VideoCodec;
+            rendition.AudioCodec = probe?.AudioCodec;
+            rendition.RecipeVersion = null;
+            rendition.Profile = null;
+            if (lesson.Availability == CatalogAvailability.Missing)
+            {
+                rendition.Revision++;
+            }
+        }
+
+        foreach (var rendition in renditions)
+        {
+            if (rendition.SourceGeneration == rendition.Lesson.SourceGeneration)
+            {
+                continue;
+            }
+
+            if (rendition.Status == RenditionStatus.Ready)
+            {
+                rendition.Status = RenditionStatus.Stale;
+                rendition.Revision++;
+            }
+        }
+
+        await context.SaveChangesAsync(cancellationToken);
+    }
+
+    internal static ProbeMetadata? ParseProbeMetadata(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<ProbeMetadata>(json, ProbeJsonOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsBrowserCompatibleContainer(string relativePath)
+    {
+        var extension = Path.GetExtension(relativePath).ToLowerInvariant();
+        return extension is ".mp4" or ".m4v" or ".mkv" or ".webm";
+    }
+
+    private static string? MediaMimeTypeFor(string relativePath) => Path.GetExtension(relativePath).ToLowerInvariant() switch
+    {
+        ".mp4" or ".m4v" => "video/mp4",
+        ".mkv" => "video/x-matroska",
+        ".webm" => "video/webm",
+        ".mov" => "video/quicktime",
+        ".ts" or ".mts" or ".m2ts" => "video/mp2t",
+        _ => null
+    };
 
     private async Task ReconcileSubtitlesAsync(
         long scanRunId,
