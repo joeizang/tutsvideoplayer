@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="src/TutsVideoPlayer.Core/TutsVideoPlayer.Core.csproj" />
+  <Project Path="src/TutsVideoPlayer.Infrastructure/TutsVideoPlayer.Infrastructure.csproj" />
+  <Project Path="src/TutsVideoPlayer.Web/TutsVideoPlayer.Web.csproj" />
+  <Project Path="src/Tests/TutsVideoPlayer.Core.Tests/TutsVideoPlayer.Core.Tests.csproj" />
+  <Project Path="src/Tests/TutsVideoPlayer.IntegrationTests/TutsVideoPlayer.IntegrationTests.csproj" />
+  <Project Path="src/Tests/TutsVideoPlayer.BrowserTests/TutsVideoPlayer.BrowserTests.csproj" />
+</Solution>
