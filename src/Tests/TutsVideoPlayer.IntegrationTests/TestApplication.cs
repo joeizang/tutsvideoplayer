@@ -39,7 +39,7 @@ public sealed class TestApplication : WebApplicationFactory<Program>, IAsyncLife
     public async Task<ScanStatusModel> EnsureCatalogScannedAsync()
     {
         var client = CreateClient();
-        var start = await client.PostAsync("/api/v1/library/scans", null, TestContext.Current.CancellationToken);
+        var start = await client.StartScanAsync(TestContext.Current.CancellationToken);
         var started = await start.Content.ReadFromJsonAsync<ScanStartResultModel>(cancellationToken: TestContext.Current.CancellationToken);
         var deadline = DateTime.UtcNow.AddSeconds(120);
         while (DateTime.UtcNow < deadline)
@@ -73,6 +73,21 @@ public sealed class TestApplication : WebApplicationFactory<Program>, IAsyncLife
             logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Debug);
             logging.AddProvider(CommandCapture);
         });
+    }
+}
+
+public static class ScanRequests
+{
+    /// <summary>
+    /// Sends a scan request the way the application's own UI does: JSON, same-origin, and
+    /// carrying the custom request header the mutation guard requires.
+    /// </summary>
+    public static Task<HttpResponseMessage> StartScanAsync(this HttpClient client, CancellationToken cancellationToken)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/library/scans");
+        request.Headers.Add(SameOriginMutationFilter.RequestHeaderName, "1");
+        request.Headers.Add("Sec-Fetch-Site", "same-origin");
+        return client.SendAsync(request, cancellationToken);
     }
 }
 

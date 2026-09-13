@@ -12,7 +12,12 @@ public sealed record DiscoveredLesson(
     string? CompanionRelativePath,
     long? CompanionLengthBytes,
     long? CompanionModifiedUtcMs,
-    MediaProbeResult? Probe);
+    MediaProbeResult? Probe,
+    // Complete content digests, calculated only when the source was inspected during this
+    // scan. A failed attempt is recorded separately from a skipped inspection.
+    string? Sha256 = null,
+    string? CompanionSha256 = null,
+    bool FingerprintFailed = false);
 
 public sealed record DiscoveredSubtitle(
     string RelativePath,

@@ -145,6 +145,24 @@ section h2 {
 }
 
 .empty-state p,
+.course-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
+
+.course-pager-status {
+    font-size: 0.9rem;
+    opacity: 0.75;
+}
+
+.course-pager-disabled {
+    opacity: 0.4;
+}
+
 .empty-search {
     color: var(--ink-secondary);
 }

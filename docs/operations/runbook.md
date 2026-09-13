@@ -38,7 +38,9 @@ Optional launchd integration is a later operational convenience, not required fo
 
 ## Linux Docker deployment design
 
-Build a multi-stage image using pinned .NET 10 SDK/runtime images and a verified FFmpeg distribution. Publish JsxCore React assets during the build. Run as a non-root user with UID/GID compatible with the library mount. Keep build tools out of the runtime image unless specifically needed by the verified JsxCore production model.
+Build a multi-stage image using pinned .NET 10 SDK/runtime images and a verified FFmpeg distribution. The pinned ASP.NET runtime image contains no ffprobe, so the runtime stage installs it explicitly and fails the build if the executable is absent; scanning cannot populate duration or codec metadata without it. The container entrypoint starts the application only: it verifies schema compatibility and refuses to serve a stale schema, but never migrates, so deploying a new image cannot change the database on its own. Schema creation and upgrades are an explicit maintenance invocation (`docker compose --profile maintenance run --rm migrate`, or `docker run --rm -v <data-volume>:/app/appdata <image> migrate`) run with the normal container stopped and after taking a backup. Publish JsxCore React assets during the build. Run as a non-root user with UID/GID compatible with the library mount. Keep build tools out of the runtime image unless specifically needed by the verified JsxCore production model.
+
+The supplied Compose file mounts the same named `application-data` volume at `/app/appdata` in both services. Keep the same Compose project name for maintenance and normal startup so both resolve to the same volume. Do not use `docker compose down --volumes` for routine upgrades: it deletes that persistent database.
 
 Mount media read/write at `/library` because permanent sibling conversions and sidecars are required. Mount persistent application data at `/data` on local storage. Do not put the SQLite database inside an unreliable network share simply because media is mounted there. Set a writable temporary directory and avoid relying on the ephemeral container layer for durable output or job state.
 

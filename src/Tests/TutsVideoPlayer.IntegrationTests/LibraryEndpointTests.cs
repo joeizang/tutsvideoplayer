@@ -30,7 +30,7 @@ public class LibraryEndpointTests(TestApplication application)
     {
         var client = application.CreateClient();
 
-        var start = await client.PostAsync("/api/v1/library/scans", null, TestContext.Current.CancellationToken);
+        var start = await client.StartScanAsync(TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
         var started = await start.Content.ReadFromJsonAsync<ScanStartResultModel>(cancellationToken: TestContext.Current.CancellationToken);
         Assert.NotNull(started);
@@ -56,8 +56,8 @@ public class LibraryEndpointTests(TestApplication application)
     {
         var client = application.CreateClient();
 
-        var first = await client.PostAsync("/api/v1/library/scans", null, TestContext.Current.CancellationToken);
-        var second = await client.PostAsync("/api/v1/library/scans", null, TestContext.Current.CancellationToken);
+        var first = await client.StartScanAsync(TestContext.Current.CancellationToken);
+        var second = await client.StartScanAsync(TestContext.Current.CancellationToken);
 
         var firstResult = await first.Content.ReadFromJsonAsync<ScanStartResultModel>(cancellationToken: TestContext.Current.CancellationToken);
         var secondResult = await second.Content.ReadFromJsonAsync<ScanStartResultModel>(cancellationToken: TestContext.Current.CancellationToken);

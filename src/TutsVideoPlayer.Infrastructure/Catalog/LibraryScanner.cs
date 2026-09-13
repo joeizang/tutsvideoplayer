@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -37,9 +38,9 @@ public sealed class LibraryScanner(
 
         var discovered = Discover(enumeration);
         var issueBuffer = new IssueBuffer(enumeration.Issues);
-        await ProbeChangedSourcesAsync(discovered.Lessons, root, issueBuffer, cancellationToken);
+        await InspectChangedSourcesAsync(discovered.Lessons, root, issueBuffer, cancellationToken);
 
-        await using var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
+        var transaction = await context.Database.BeginTransactionAsync(cancellationToken);
 
         try
         {
@@ -78,14 +79,23 @@ public sealed class LibraryScanner(
         }
         catch (OperationCanceledException)
         {
+            // Roll the reconciliation back before recording the outcome, otherwise the
+            // status write would be discarded with the transaction and the run would
+            // stay Running forever.
+            await RollbackQuietlyAsync(transaction);
             await AbortRunAsync(scanRunId, "Canceled", cancellationToken);
             throw;
         }
         catch (Exception exception)
         {
             logger.LogError(exception, "Scan {ScanRunId} failed.", scanRunId);
+            await RollbackQuietlyAsync(transaction);
             await AbortRunAsync(scanRunId, "Failed", cancellationToken, exception.Message);
             return new ScanOutcome(0, 0, Succeeded: false);
+        }
+        finally
+        {
+            await transaction.DisposeAsync();
         }
     }
 
@@ -201,58 +211,125 @@ public sealed class LibraryScanner(
         return new Discovery(lessons, subtitles);
     }
 
-    private async Task ProbeChangedSourcesAsync(
+    private async Task InspectChangedSourcesAsync(
         Dictionary<string, DiscoveredLesson> discoveredLessons,
         string root,
         IssueBuffer issueBuffer,
         CancellationToken cancellationToken)
     {
-        var existingComponents = await context.SourceComponents
-            .Where(component => discoveredLessons.Keys.Contains(component.RelativePath))
-            .Select(component => new
-            {
-                component.RelativePath,
-                component.Generation,
+        // Only the components of each lesson's current source generation describe what is
+        // on disk today. Superseded generations keep the same relative path, so including
+        // them would both duplicate keys and compare against replaced content.
+        var currentComponents = await context.SourceComponents
+            .Where(component => discoveredLessons.Keys.Contains(component.Lesson.PrimaryRelativePath)
+                && component.Generation == component.Lesson.SourceGeneration)
+            .Select(component => new CurrentComponent(
+                component.Lesson.PrimaryRelativePath,
                 component.Role,
+                component.RelativePath,
                 component.LengthBytes,
                 component.ModifiedUtcMs,
-                LessonGeneration = component.Lesson.SourceGeneration
-            })
+                component.ProbeMetadata,
+                component.Sha256))
             .ToListAsync(cancellationToken);
 
-        var existingVideos = existingComponents
-            .Where(component => component.Role == SourceComponentRole.Video)
-            .ToDictionary(component => component.RelativePath);
+        var currentVideos = IndexByLessonPath(currentComponents, SourceComponentRole.Video);
+        var currentCompanions = IndexByLessonPath(currentComponents, SourceComponentRole.CompanionAudio);
 
         foreach (var lesson in discoveredLessons.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var existingVideo = existingVideos.GetValueOrDefault(lesson.RelativePath);
-            var needsProbe = existingVideo is null
-                || existingVideo.LengthBytes != lesson.LengthBytes
-                || existingVideo.ModifiedUtcMs != lesson.ModifiedUtcMs;
+            var inspected = lesson;
+            var currentVideo = currentVideos.GetValueOrDefault(lesson.RelativePath);
+            var videoHintsMatch = currentVideo is not null
+                && string.Equals(currentVideo.RelativePath, lesson.RelativePath, StringComparison.Ordinal)
+                && currentVideo.LengthBytes == lesson.LengthBytes
+                && currentVideo.ModifiedUtcMs == lesson.ModifiedUtcMs;
 
-            if (!needsProbe)
+            // Unresolved probe metadata and unknown fingerprints are retried on every scan:
+            // a stored size and modification time are not a valid cache entry on their own,
+            // so repairing ffprobe has to actually recover duration and codec discovery.
+            var videoNeedsInspection = !videoHintsMatch
+                || currentVideo!.ProbeMetadata is null
+                || currentVideo.Sha256 is null;
+
+            if (videoNeedsInspection)
             {
-                continue;
+                var absolutePath = Path.Combine(root, lesson.RelativePath);
+                var probe = await probeAdapter.ProbeAsync(absolutePath, cancellationToken);
+                if (probe.Success)
+                {
+                    inspected = inspected with { Probe = probe };
+                }
+                else
+                {
+                    issueBuffer.Add(new LibraryEnumerationIssue(
+                        lesson.RelativePath,
+                        "ProbeFailed",
+                        probe.Error ?? "The media file could not be probed."));
+                }
+
+                var digest = await ContentFingerprint.ComputeAsync(absolutePath, cancellationToken);
+                if (digest is null)
+                {
+                    issueBuffer.Add(new LibraryEnumerationIssue(
+                        lesson.RelativePath,
+                        "FingerprintFailed",
+                        "The source content digest could not be calculated; source reconciliation will be retried on the next scan."));
+                }
+
+                inspected = inspected with { Sha256 = digest, FingerprintFailed = digest is null };
             }
 
-            var absolutePath = Path.Combine(root, lesson.RelativePath);
-            var probe = await probeAdapter.ProbeAsync(absolutePath, cancellationToken);
-            if (probe.Success)
+            if (lesson.CompanionRelativePath is not null)
             {
-                discoveredLessons[lesson.RelativePath] = lesson with { Probe = probe };
+                var currentCompanion = currentCompanions.GetValueOrDefault(lesson.RelativePath);
+                var companionHintsMatch = currentCompanion is not null
+                    && string.Equals(currentCompanion.RelativePath, lesson.CompanionRelativePath, StringComparison.Ordinal)
+                    && currentCompanion.LengthBytes == lesson.CompanionLengthBytes
+                    && currentCompanion.ModifiedUtcMs == lesson.CompanionModifiedUtcMs;
+
+                if (!companionHintsMatch || currentCompanion!.Sha256 is null)
+                {
+                    var digest = await ContentFingerprint.ComputeAsync(
+                        Path.Combine(root, lesson.CompanionRelativePath), cancellationToken);
+                    if (digest is null)
+                    {
+                        issueBuffer.Add(new LibraryEnumerationIssue(
+                            lesson.CompanionRelativePath,
+                            "FingerprintFailed",
+                            "The companion content digest could not be calculated; source reconciliation will be retried on the next scan."));
+                    }
+
+                    inspected = inspected with
+                    {
+                        CompanionSha256 = digest,
+                        FingerprintFailed = inspected.FingerprintFailed || digest is null
+                    };
+                }
             }
-            else
-            {
-                issueBuffer.Add(new LibraryEnumerationIssue(
-                    lesson.RelativePath,
-                    "ProbeFailed",
-                    probe.Error ?? "The media file could not be probed."));
-            }
+
+            discoveredLessons[lesson.RelativePath] = inspected;
         }
     }
+
+    private static Dictionary<string, CurrentComponent> IndexByLessonPath(
+        IReadOnlyList<CurrentComponent> components,
+        SourceComponentRole role) =>
+        components
+            .Where(component => component.Role == role)
+            .GroupBy(component => component.LessonPath, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+
+    private sealed record CurrentComponent(
+        string LessonPath,
+        SourceComponentRole Role,
+        string RelativePath,
+        long LengthBytes,
+        long ModifiedUtcMs,
+        string? ProbeMetadata,
+        string? Sha256);
 
     private sealed record ExistingCatalog(
         Dictionary<string, CourseEntity> CoursesByDirectory,
@@ -324,6 +401,19 @@ public sealed class LibraryScanner(
             .Select(lesson => lesson.FolderDirectory)
             .ToHashSet(StringComparer.Ordinal);
 
+        // LIB-02 allows arbitrary nesting. Only directories that directly contain a lesson
+        // are discovered, so every intermediate ancestor has to be materialized before the
+        // hierarchy can be linked; otherwise "Course/Parent/Child/video.mp4" would create
+        // Child without Parent and the parent lookup below would fail the whole scan.
+        foreach (var directory in folderDirectories.ToList())
+        {
+            var ancestorSegments = directory.Split('/');
+            for (var depth = 2; depth < ancestorSegments.Length; depth++)
+            {
+                folderDirectories.Add(string.Join('/', ancestorSegments[..depth]));
+            }
+        }
+
         foreach (var directory in folderDirectories.OrderBy(directory => directory, StringComparer.Ordinal))
         {
             var segments = directory.Split('/');
@@ -353,7 +443,17 @@ public sealed class LibraryScanner(
 
             var parentDirectory = string.Join('/', segments[..^1]);
             var folder = existing.FoldersByDirectory[directory];
-            folder.ParentFolderId = existing.FoldersByDirectory[parentDirectory].Id;
+            if (!existing.FoldersByDirectory.TryGetValue(parentDirectory, out var parentFolder))
+            {
+                // Defensive: a missing ancestor must not roll back the entire catalog scan.
+                logger.LogWarning(
+                    "Lesson folder {Directory} has no materialized parent {ParentDirectory}; it is linked to its course directly.",
+                    directory, parentDirectory);
+                folder.ParentFolderId = null;
+                continue;
+            }
+
+            folder.ParentFolderId = parentFolder.Id;
         }
 
         await context.SaveChangesAsync(cancellationToken);
@@ -397,71 +497,42 @@ public sealed class LibraryScanner(
             if (videoComponent is null)
             {
                 lesson.DurationMs = discoveredLesson.Probe?.DurationMs;
-                context.SourceComponents.Add(new SourceComponentEntity
-                {
-                    Lesson = lesson,
-                    Generation = lesson.SourceGeneration,
-                    Role = SourceComponentRole.Video,
-                    RelativePath = discoveredLesson.RelativePath,
-                    LengthBytes = discoveredLesson.LengthBytes,
-                    ModifiedUtcMs = discoveredLesson.ModifiedUtcMs,
-                    ProbeMetadata = SerializeProbe(discoveredLesson.Probe)
-                });
-
-                if (discoveredLesson.CompanionRelativePath is not null)
-                {
-                    context.SourceComponents.Add(new SourceComponentEntity
-                    {
-                        Lesson = lesson,
-                        Generation = lesson.SourceGeneration,
-                        Role = SourceComponentRole.CompanionAudio,
-                        RelativePath = discoveredLesson.CompanionRelativePath,
-                        LengthBytes = discoveredLesson.CompanionLengthBytes!.Value,
-                        ModifiedUtcMs = discoveredLesson.CompanionModifiedUtcMs!.Value
-                    });
-                }
-
+                AddSourceComponents(lesson, discoveredLesson, lesson.SourceGeneration, null, null);
                 continue;
             }
 
-            var videoChanged = videoComponent.LengthBytes != discoveredLesson.LengthBytes
-                || ProbeDiffers(videoComponent, discoveredLesson.Probe);
-            var companionChanged = companionComponent is not null
-                && discoveredLesson.CompanionRelativePath is not null
-                && (companionComponent.RelativePath != discoveredLesson.CompanionRelativePath
-                    || companionComponent.LengthBytes != discoveredLesson.CompanionLengthBytes);
+            // Preserve the entire verified source set when either component could not be
+            // read. Updating its hints would hide the unresolved change on the next scan,
+            // and accepting only the other component would mix two different generations.
+            if (discoveredLesson.FingerprintFailed)
+            {
+                continue;
+            }
+
+            var videoChanged = VideoContentChanged(videoComponent, discoveredLesson);
+            var companionChanged = CompanionSetChanged(companionComponent, discoveredLesson);
 
             if (videoChanged || companionChanged)
             {
                 lesson.SourceGeneration++;
-                lesson.DurationMs = discoveredLesson.Probe?.DurationMs;
-                context.SourceComponents.Add(new SourceComponentEntity
+                if (videoChanged || discoveredLesson.Probe is not null)
                 {
-                    Lesson = lesson,
-                    Generation = lesson.SourceGeneration,
-                    Role = SourceComponentRole.Video,
-                    RelativePath = discoveredLesson.RelativePath,
-                    LengthBytes = discoveredLesson.LengthBytes,
-                    ModifiedUtcMs = discoveredLesson.ModifiedUtcMs,
-                    ProbeMetadata = SerializeProbe(discoveredLesson.Probe)
-                });
-                if (discoveredLesson.CompanionRelativePath is not null)
-                {
-                    context.SourceComponents.Add(new SourceComponentEntity
-                    {
-                        Lesson = lesson,
-                        Generation = lesson.SourceGeneration,
-                        Role = SourceComponentRole.CompanionAudio,
-                        RelativePath = discoveredLesson.CompanionRelativePath,
-                        LengthBytes = discoveredLesson.CompanionLengthBytes!.Value,
-                        ModifiedUtcMs = discoveredLesson.CompanionModifiedUtcMs!.Value
-                    });
+                    // A companion-only change must not discard an established duration.
+                    lesson.DurationMs = discoveredLesson.Probe?.DurationMs;
                 }
+
+                AddSourceComponents(
+                    lesson,
+                    discoveredLesson,
+                    lesson.SourceGeneration,
+                    videoChanged ? null : videoComponent,
+                    companionChanged ? null : companionComponent);
             }
             else
             {
                 videoComponent.LengthBytes = discoveredLesson.LengthBytes;
                 videoComponent.ModifiedUtcMs = discoveredLesson.ModifiedUtcMs;
+                videoComponent.Sha256 ??= discoveredLesson.Sha256;
                 if (discoveredLesson.Probe is not null)
                 {
                     videoComponent.ProbeMetadata = SerializeProbe(discoveredLesson.Probe);
@@ -472,6 +543,7 @@ public sealed class LibraryScanner(
                 {
                     companionComponent.LengthBytes = discoveredLesson.CompanionLengthBytes!.Value;
                     companionComponent.ModifiedUtcMs = discoveredLesson.CompanionModifiedUtcMs!.Value;
+                    companionComponent.Sha256 ??= discoveredLesson.CompanionSha256;
                 }
             }
         }
@@ -616,10 +688,118 @@ public sealed class LibraryScanner(
         await context.SaveChangesAsync(cancellationToken);
     }
 
+    private void AddSourceComponents(
+        LessonEntity lesson,
+        DiscoveredLesson discovered,
+        int generation,
+        SourceComponentEntity? unchangedVideo,
+        SourceComponentEntity? unchangedCompanion)
+    {
+        context.SourceComponents.Add(new SourceComponentEntity
+        {
+            Lesson = lesson,
+            Generation = generation,
+            Role = SourceComponentRole.Video,
+            RelativePath = discovered.RelativePath,
+            LengthBytes = discovered.LengthBytes,
+            ModifiedUtcMs = discovered.ModifiedUtcMs,
+            Sha256 = discovered.Sha256 ?? unchangedVideo?.Sha256,
+            ProbeMetadata = SerializeProbe(discovered.Probe) ?? unchangedVideo?.ProbeMetadata
+        });
+
+        if (discovered.CompanionRelativePath is null)
+        {
+            // A removed companion is simply absent from the new generation instead of
+            // leaving a stale component attached to the lesson.
+            return;
+        }
+
+        context.SourceComponents.Add(new SourceComponentEntity
+        {
+            Lesson = lesson,
+            Generation = generation,
+            Role = SourceComponentRole.CompanionAudio,
+            RelativePath = discovered.CompanionRelativePath,
+            LengthBytes = discovered.CompanionLengthBytes!.Value,
+            ModifiedUtcMs = discovered.CompanionModifiedUtcMs!.Value,
+            Sha256 = discovered.CompanionSha256 ?? unchangedCompanion?.Sha256
+        });
+    }
+
+    private static bool VideoContentChanged(SourceComponentEntity component, DiscoveredLesson discovered)
+    {
+        if (discovered.Sha256 is null)
+        {
+            // The source was not inspected during this scan because its size, modification
+            // time and stored probe metadata all matched; the identity is unchanged.
+            return false;
+        }
+
+        if (component.Sha256 is not null)
+        {
+            // Complete content digests decide identity. Equal length, duration, codecs and
+            // dimensions are not evidence that the bytes are the same bytes.
+            return !string.Equals(component.Sha256, discovered.Sha256, StringComparison.Ordinal);
+        }
+
+        // No digest was ever established for the stored generation, so fall back to hints.
+        // The freshly calculated digest is persisted, so the next change is decided by content.
+        return component.LengthBytes != discovered.LengthBytes
+            || ProbeDiffers(component, discovered.Probe);
+    }
+
+    private static bool CompanionSetChanged(SourceComponentEntity? component, DiscoveredLesson discovered)
+    {
+        if (component is null)
+        {
+            // A companion that appeared since the last scan changes the source set and has
+            // to be recorded, which the previous both-non-null comparison never did.
+            return discovered.CompanionRelativePath is not null;
+        }
+
+        if (discovered.CompanionRelativePath is null)
+        {
+            return true;
+        }
+
+        if (!string.Equals(component.RelativePath, discovered.CompanionRelativePath, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (discovered.CompanionSha256 is null)
+        {
+            return false;
+        }
+
+        return component.Sha256 is not null
+            ? !string.Equals(component.Sha256, discovered.CompanionSha256, StringComparison.Ordinal)
+            : component.LengthBytes != discovered.CompanionLengthBytes;
+    }
+
+    private async Task RollbackQuietlyAsync(IDbContextTransaction transaction)
+    {
+        try
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or DbException or DbUpdateException)
+        {
+            logger.LogWarning(exception, "The scan transaction could not be rolled back cleanly.");
+        }
+        finally
+        {
+            // Everything the failed reconciliation staged is discarded so the failure is
+            // recorded through a clean unit of work outside the rolled-back transaction.
+            context.ChangeTracker.Clear();
+        }
+    }
+
     private async Task AbortRunAsync(long scanRunId, string state, CancellationToken cancellationToken, string? message = null)
     {
         try
         {
+            context.ChangeTracker.Clear();
             var run = await context.ScanRuns.SingleAsync(r => r.Id == scanRunId, CancellationToken.None);
             run.State = state;
             run.FinishedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -636,8 +816,12 @@ public sealed class LibraryScanner(
 
             await context.SaveChangesAsync(CancellationToken.None);
         }
-        catch (Exception exception) when (exception is DbUpdateException or InvalidOperationException)
+        catch (Exception exception) when (exception is DbUpdateException or InvalidOperationException or DbException)
         {
+            logger.LogError(
+                exception,
+                "Scan {ScanRunId} could not be recorded as {State}; it may need recovery on the next startup.",
+                scanRunId, state);
         }
     }
 

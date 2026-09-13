@@ -22,6 +22,7 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
     const courses = model.courses;
     const query = model.searchQuery;
     const scanNotice = scanLabel(summary.latestScan);
+    const lastPage = Math.max(1, Math.ceil(model.matchingCourseCount / model.pageSize));
 
     return (
         <main className="app-shell">
@@ -33,7 +34,10 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
                         {summary.missingLessonCount > 0 ? ` · ${summary.missingLessonCount} missing` : ""}
                     </p>
                 </div>
-                <RefreshLibraryButton initialScanState={summary.latestScan?.state ?? null} />
+                <RefreshLibraryButton
+                    initialScanState={summary.latestScan?.state ?? null}
+                    initialScanRunId={summary.latestScan?.scanRunId ?? null}
+                />
             </header>
 
             {scanNotice ? <p className={summary.latestScan?.state === "Failed" ? "scan-error" : "scan-notice"}>{scanNotice}</p> : null}
@@ -67,11 +71,20 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
                             No courses or lessons match “{query}”. <a href="/">Clear search</a>
                         </p>
                     ) : (
-                        <ul className="course-list">
-                            {courses.map((course) => (
-                                <CourseRow key={course.id} course={course} />
-                            ))}
-                        </ul>
+                        <>
+                            <ul className="course-list">
+                                {courses.map((course) => (
+                                    <CourseRow key={course.id} course={course} />
+                                ))}
+                            </ul>
+                            <CoursePager
+                                page={model.page}
+                                pageSize={model.pageSize}
+                                lastPage={lastPage}
+                                total={model.matchingCourseCount}
+                                query={query}
+                            />
+                        </>
                     )}
                 </section>
             )}
@@ -79,11 +92,68 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
     );
 }
 
+function coursesHref(page: number, pageSize: number, query: string | null | undefined): string {
+    // Built by hand rather than with URLSearchParams, which the server-side render host
+    // does not provide.
+    const parameters: string[] = [];
+    if (query) {
+        parameters.push(`q=${encodeURIComponent(query)}`);
+    }
+    if (page > 1) {
+        parameters.push(`page=${page}`);
+    }
+    parameters.push(`pageSize=${pageSize}`);
+
+    return `/?${parameters.join("&")}`;
+}
+
+function CoursePager({
+    page,
+    pageSize,
+    lastPage,
+    total,
+    query
+}: {
+    page: number;
+    pageSize: number;
+    lastPage: number;
+    total: number;
+    query: string | null | undefined;
+}) {
+    if (lastPage <= 1) {
+        return null;
+    }
+
+    return (
+        <nav className="course-pager" aria-label="Course pages">
+            {page > 1 ? (
+                <a rel="prev" href={coursesHref(page - 1, pageSize, query)}>
+                    Previous
+                </a>
+            ) : (
+                <span className="course-pager-disabled">Previous</span>
+            )}
+            <span className="course-pager-status">
+                {`Page ${page} of ${lastPage} · ${total} courses`}
+            </span>
+            {page < lastPage ? (
+                <a rel="next" href={coursesHref(page + 1, pageSize, query)}>
+                    Next
+                </a>
+            ) : (
+                <span className="course-pager-disabled">Next</span>
+            )}
+        </nav>
+    );
+}
+
 function CourseRow({ course }: { course: CourseSummaryModel }) {
     return (
         <li className={course.available ? "course-row" : "course-row course-missing"}>
             <span className="course-title">
-                <a href={`/watch/${course.id}`}>{course.title}</a>
+                {/* Course and lesson IDs are independent: the entry route resolves a lesson
+                    that belongs to this course instead of reusing the course ID as one. */}
+                <a href={`/courses/${course.id}`}>{course.title}</a>
             </span>
             <span className="course-counts">
                 {course.availableLessonCount} of {course.lessonCount} lessons available

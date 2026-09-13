@@ -92,7 +92,10 @@ public sealed record LessonDetailModel(
 public sealed record LibraryHomeModel(
     [property: JsonPropertyName("summary")] LibrarySummaryModel Summary,
     [property: JsonPropertyName("courses")] IReadOnlyList<CourseSummaryModel> Courses,
-    [property: JsonPropertyName("searchQuery")] string? SearchQuery);
+    [property: JsonPropertyName("searchQuery")] string? SearchQuery,
+    [property: JsonPropertyName("page")] int Page,
+    [property: JsonPropertyName("pageSize")] int PageSize,
+    [property: JsonPropertyName("matchingCourseCount")] int MatchingCourseCount);
 
 public sealed record WatchLessonModel(
     [property: JsonPropertyName("lesson")] LessonDetailModel Lesson,

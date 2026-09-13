@@ -12,11 +12,19 @@ namespace TutsVideoPlayer.Web.Features.Home;
 
 public sealed class HomeController(AppDbContext context) : Controller
 {
-    private const int CoursePageSize = 24;
+    private const int DefaultCoursePageSize = 24;
+    private const int MaximumCoursePageSize = 100;
 
     [HttpGet("/")]
-    public async Task<IActionResult> Index([FromQuery] string? q, CancellationToken cancellationToken)
+    public async Task<IActionResult> Index(
+        [FromQuery] string? q,
+        [FromQuery] int page,
+        [FromQuery] int? pageSize,
+        CancellationToken cancellationToken)
     {
+        page = Math.Max(1, page);
+        var effectivePageSize = Math.Clamp(pageSize ?? DefaultCoursePageSize, 1, MaximumCoursePageSize);
+
         var library = await context.Libraries.AsNoTracking().SingleOrDefaultAsync(cancellationToken);
 
         var courseCount = await context.Courses.AsNoTracking().CountAsync(cancellationToken);
@@ -38,10 +46,17 @@ public sealed class HomeController(AppDbContext context) : Controller
                 || course.Lessons.Any(lesson => EF.Functions.Like(lesson.SearchTitle, pattern, "\\")));
         }
 
+        // LIB-07 requires the course list to stay complete as folders are added, so the
+        // page size is a page boundary rather than a silent cap on what can be browsed.
+        var matchingCourseCount = await coursesQuery.CountAsync(cancellationToken);
+        var lastPage = Math.Max(1, (int)Math.Ceiling(matchingCourseCount / (double)effectivePageSize));
+        page = Math.Min(page, lastPage);
+
         var courses = await coursesQuery
             .OrderBy(course => course.SortKey)
             .ThenBy(course => course.Id)
-            .Take(CoursePageSize)
+            .Skip((page - 1) * effectivePageSize)
+            .Take(effectivePageSize)
             .Select(course => new CourseSummaryModel(
                 course.Id.ToString(CultureInfo.InvariantCulture),
                 course.DisplayTitle,
@@ -72,7 +87,10 @@ public sealed class HomeController(AppDbContext context) : Controller
                         latest.CatalogRevision),
                 new LibraryStatusModel(true, true, true)),
             courses,
-            searchQuery);
+            searchQuery,
+            page,
+            effectivePageSize,
+            matchingCourseCount);
 
         return this.Jsx("Home/Index", model, RenderMode.ServerAndClient);
     }

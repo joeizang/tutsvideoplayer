@@ -15,6 +15,7 @@ public sealed class ScannerHarness : IAsyncLifetime
     public AppDbContext Context { get; private set; } = null!;
     public LibraryScanner Scanner { get; private set; } = null!;
     public FailureInjectingEnumerator Enumerator { get; private set; } = null!;
+    public InMemoryLogger<LibraryScanner> Logger { get; } = new();
     private SqliteConnection? _connection;
 
     public async ValueTask InitializeAsync()
@@ -30,10 +31,16 @@ public sealed class ScannerHarness : IAsyncLifetime
         Context = new AppDbContext(options);
         await Context.Database.MigrateAsync();
 
-        var inMemoryLogger = new InMemoryLogger<LibraryScanner>();
         Enumerator = new FailureInjectingEnumerator(new FileSystemLibraryEnumerator());
-        Scanner = new LibraryScanner(Context, Enumerator, new FFprobeAdapter("ffprobe"), inMemoryLogger);
+        UseProbe("ffprobe");
     }
+
+    /// <summary>
+    /// Rebuilds the scanner around a different probe executable so that probe failure and
+    /// later recovery can be exercised without a real media fixture.
+    /// </summary>
+    public void UseProbe(string ffprobePath) =>
+        Scanner = new LibraryScanner(Context, Enumerator, new FFprobeAdapter(ffprobePath), Logger);
 
     public async ValueTask DisposeAsync()
     {
@@ -78,9 +85,17 @@ public sealed class FailureInjectingEnumerator(ILibraryFileEnumerator inner) : I
 {
     public HashSet<string> FailingDirectories { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Extra entries appended to every enumeration. Repeating an existing subtitle path is
+    /// the cheapest way to make reconciliation throw after the scan transaction is open.
+    /// </summary>
+    public List<LibraryFileEntry> ExtraFiles { get; } = [];
+
     public LibraryEnumeration Enumerate(string root, CancellationToken cancellationToken = default)
     {
         var result = inner.Enumerate(root, cancellationToken);
+        result.Files.AddRange(ExtraFiles);
+
         if (FailingDirectories.Count == 0)
         {
             return result;

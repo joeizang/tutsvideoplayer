@@ -23,7 +23,11 @@ if (args.Any(arg => arg == "migrate"))
     return;
 }
 
-builder.Services.AddControllers();
+builder.Services.AddControllers(mvcOptions =>
+{
+    // Applied to every controller so a future mutating endpoint is protected by default.
+    mvcOptions.Filters.Add<SameOriginMutationFilter>();
+});
 builder.Services.AddProblemDetails(options =>
 {
     options.CustomizeProblemDetails = context =>
