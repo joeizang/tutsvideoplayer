@@ -15,7 +15,7 @@ flowchart LR
     Probe --> Files
 ```
 
-The diagrams describe intended design, not existing components.
+The diagrams describe intended design. As of milestone 0, the ASP.NET host, JsxCore entry view, JSON endpoints, health endpoints, seekable media delivery, and the Linux container path exist; SQLite, the background preparation worker, and the library/preparation features arrive with later milestones.
 
 ## Future repository layout
 
@@ -59,9 +59,11 @@ tutsvideoplayer/
     │   │   ├── Subtitles/
     │   │   └── Settings/
 │   ├── Hosting/
-│   ├── Views/                  # JsxCore TSX entry views
-│   ├── Client/                 # React components, hooks, styles
-│   └── wwwroot/                # bundled public assets only
+│   │   └── ...                    # health checks and registration helpers
+│   ├── Views/                     # JsxCore TSX entry views and their stylesheets
+│   ├── Media/                     # synthetic demo fixtures served through media endpoints
+│   ├── Client/                    # React components, hooks, styles; arrives with the first shared components (M2)
+│   └── wwwroot/                   # bundled public assets only
 │   ├── Tests/
 │   │   ├── TutsVideoPlayer.Core.Tests/
 │   │   ├── TutsVideoPlayer.IntegrationTests/
@@ -70,9 +72,10 @@ tutsvideoplayer/
 │   │   ├── Dockerfile
 │   │   └── compose.yaml
 │   └── scripts/
+│       └── generate-fixtures.sh
 ```
 
-This tree is a planned layout, not permission to create scaffolding now. All project and code files, including tests and deployment scripts, stay within `src`. The root `.slnx` references projects beneath it. Run SDK-sensitive build commands from `src` so its `global.json` participates in SDK selection; use `../TutsVideoPlayer.slnx` as the solution argument. Validate this convention in the build instructions and container context rather than moving project files to the root.
+This layout was created in milestone 0 and matches the documented shape. All project and code files, including tests and deployment scripts, stay within `src`. The root `.slnx` references projects beneath it. Run SDK-sensitive build commands from `src` so its `global.json` participates in SDK selection; use `../TutsVideoPlayer.slnx` as the solution argument. This convention was validated in milestone 0 on macOS (`dotnet --version` from `src` resolves the pinned SDK) and inside the Linux container build.
 
 ## Dependencies and responsibilities
 
@@ -106,6 +109,19 @@ Select actual React with the project's documented `JsxCoreFramework` setting. Us
 The integration spike must establish the exact entry-view conventions, React version, import resolution, production build outputs, local asset bundling, and Linux publish behavior of the pinned JsxCore package. Avoid inventing unverified registration APIs in advance. Confirm direct navigation to a lesson route returns the application shell, then React fetches same-origin data. A small server-rendered shell is acceptable; player state must not depend on server-side browser APIs.
 
 Do not silently replace JsxCore with Vite, Blazor, or ReactJS.NET if a component import fails. Prefer a native video element and small local React controls to minimize package compatibility risk. JsxCore documents API-plus-view hosting and selectable React; this design chooses that pattern. [Official integration guide](https://github.com/davidwhitney/JsxCore/blob/main/docs/views-and-web-apis.md), [runtime selection](https://github.com/davidwhitney/JsxCore/blob/main/docs/runtimes.md).
+
+### Resolved entry conventions (validated in milestone 0)
+
+The spike used JsxCore 1.0.2 with `<JsxCoreFramework>react</JsxCoreFramework>`, which restores React 19.3 from npm, compiles TSX with the native TypeScript 7 compiler, and minifies Release assets with esbuild 0.28.2. No Node process runs at build or request time.
+
+- Registration: `builder.AddJsxCore()` on the host builder and `app.UseJsxCore()` before `UseRouting()`.
+- Entry view: `Views/Home/Index.tsx` default-exports a component typed with `ViewProps<T>`; the controller returns `this.Jsx("Home/Index", model, RenderMode.ServerAndClient)` for first paint plus hydration.
+- Shared types: records in a namespace containing the `Models` segment are exported automatically; views import them as `dotnet:types/TutsVideoPlayer/Web/Models` — the .NET namespace with its dots as slashes.
+- Stylesheets imported beside a view become document links automatically; keep styles under the views directory or the web root.
+- `dotnet build` creates `package.json`/`package-lock.json` beside the project; commit both, ignore `node_modules` and generated `obj/` output except `Views/tsconfig.json`, which editors use.
+- Release publish emits precompiled minified assets. React's "dead code elimination has not been applied" console error is a Debug-build artifact and does not appear in Release.
+- The runtime writes generated modules under the content root's `obj/JsxCore`, so containers must run as a user that owns the published output (`COPY --chown=$APP_UID`); a root-owned copy fails startup with `UnauthorizedAccessException`.
+- Integration tests share one `WebApplicationFactory` in a single xunit collection: concurrent hosts in one process race on JsxCore's stylesheet staging directory (`obj/JsxCore/js/_dist/.staging`) and fail intermittently.
 
 ## Concurrency and lifetime rules
 

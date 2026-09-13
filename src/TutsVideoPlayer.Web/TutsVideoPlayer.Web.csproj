@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <JsxCoreFramework>react</JsxCoreFramework>
+    <RootNamespace>TutsVideoPlayer.Web</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="JsxCore" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TutsVideoPlayer.Core\TutsVideoPlayer.Core.csproj" />
+    <ProjectReference Include="..\TutsVideoPlayer.Infrastructure\TutsVideoPlayer.Infrastructure.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Media\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -21,6 +21,24 @@ The frontend skill generally asks for mobile reflow; the user's explicit exclusi
 
 The DDD/EF repository guidance is reconciled explicitly in ADR 0003. SQLite migration limitations override generic provider-agnostic idempotent-script examples. The query optimization skill is used to specify future evidence and query shape; no existing slow queries or performance improvements are claimed.
 
+## Resolved implementation versions (milestone 0, 2026-09-13)
+
+Pinned in `src/global.json` and `src/Directory.Packages.props`, and in the Web project's generated `package.json`/`package-lock.json`.
+
+| Component | Version |
+| --- | --- |
+| .NET SDK (`rollForward: latestFeature`) | 10.0.302 |
+| ASP.NET Core runtime (macOS and Linux validation) | 10.0.10 |
+| JsxCore | 1.0.2 |
+| React / ReactDOM | 19.3.0 |
+| TypeScript (native compiler, restored by the build) | 7.x |
+| esbuild (Release minifier, restored by the build) | 0.28.2 |
+| EF Core / SQLite / Design (pinned ahead of M1) | 10.0.12 |
+| Microsoft.AspNetCore.Mvc.Testing | 10.0.12 |
+| xunit.v3 / xunit.runner.visualstudio | 3.2.2 / 3.1.5 |
+| Microsoft.NET.Test.Sdk | 18.10.0 |
+| Container images | `dotnet/sdk:10.0.302`, `dotnet/aspnet:10.0.10` |
+
 ## Primary technical references
 
 | Source | Supports |
@@ -39,6 +57,8 @@ These sources inform the design. Cache budgets, filenames, API routes, threshold
 
 ## Evidence boundaries
 
-Local library counts and sample codecs came from read-only inspection in the planning conversation. They are recorded in [decision provenance](product/decisions.md). The Linux host and a complete codec inventory were not inspected. There is no executable application to benchmark, test, or inspect yet.
+Local library counts and sample codecs came from read-only inspection in the planning conversation. They are recorded in [decision provenance](product/decisions.md). The Linux host and a complete codec inventory were not inspected.
+
+Milestone 0 (2026-09-13) produced a runnable stack: reproducible restore/build/publish of the root solution, a JsxCore React view verified hydrated in a real browser on macOS and in a Linux container, same-origin JSON fetch, and byte-range media delivery (206 partial content) with a synthetic fixture. No library data, database, or conversion behavior exists yet; the real video library was not touched. Later milestones still require their own runtime evidence.
 
 The documentation task creates Markdown only. Its validation checks structure, internal links, requirement coverage, and consistency. Runtime tests, renders, schema migrations, and conversion experiments are future implementation work.

@@ -1,0 +1,137 @@
+:root {
+    color-scheme: light dark;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #f6f7f9;
+    color: #1c1e21;
+}
+
+.app-shell {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+}
+
+.app-shell header h1 {
+    margin: 0 0 0.25rem;
+    font-size: 1.5rem;
+}
+
+.subtitle {
+    margin: 0 0 2rem;
+    color: #5b616b;
+}
+
+.app-shell section {
+    background: #ffffff;
+    border: 1px solid #e2e5ea;
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.5rem;
+}
+
+.app-shell section h2 {
+    margin: 0 0 1rem;
+    font-size: 1.05rem;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.35rem 1rem;
+    margin: 0 0 1rem;
+}
+
+.info-grid dt {
+    font-weight: 600;
+    color: #5b616b;
+}
+
+.info-grid dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+button {
+    font: inherit;
+    padding: 0.45rem 0.9rem;
+    border-radius: 8px;
+    border: 1px solid #b8bec7;
+    background: #eef1f5;
+    color: inherit;
+    cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+    background: #e2e7ee;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.error {
+    color: #a4262c;
+    margin: 0.75rem 0 0;
+}
+
+.hint {
+    color: #5b616b;
+    font-size: 0.9rem;
+    margin: 0.75rem 0 0;
+}
+
+.fixture-video {
+    display: block;
+    width: 100%;
+    max-width: 640px;
+    border-radius: 8px;
+    background: #000;
+    aspect-ratio: 16 / 9;
+}
+
+@media (prefers-color-scheme: dark) {
+    body {
+        background: #14161a;
+        color: #e6e8eb;
+    }
+
+    .app-shell section {
+        background: #1d2026;
+        border-color: #33383f;
+    }
+
+    .info-grid dt,
+    .subtitle,
+    .hint {
+        color: #9aa2ad;
+    }
+
+    button {
+        background: #262b33;
+        border-color: #3d434d;
+    }
+
+    button:hover:not(:disabled) {
+        background: #2f3540;
+    }
+
+    .error {
+        color: #e5727a;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        transition: none !important;
+    }
+}

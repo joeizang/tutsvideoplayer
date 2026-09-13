@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: planned only. Every checklist item is intentionally incomplete. The user has authorized documentation, not implementation. Execute this plan only after a later implementation request.
+Status: milestone 0 executed on 2026-09-13 with explicit user authorization; milestones M1–M7 remain planned. Every M1+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -12,17 +12,21 @@ Each increment includes domain behavior where necessary, EF mappings/query proje
 
 Dependencies: later authorization to implement.
 
-- [ ] Verify current .NET 10 SDK/runtime and select pinned stable package versions.
-- [ ] Create the documented `src` projects and root `.slnx`; keep test projects beneath `src/Tests`.
-- [ ] Configure shared build/package settings under `src`; verify building the root solution from that working directory respects SDK selection.
-- [ ] Establish ASP.NET Core 10 controller API with ProblemDetails and one JsxCore TSX entry view using actual React.
-- [ ] Demonstrate browser React state/hooks and a same-origin JSON request.
-- [ ] Verify local production assets and no runtime CDN dependency.
-- [ ] Publish and run on macOS; validate Linux container build/runtime with a tiny safe fixture.
-- [ ] Exercise native video playback and byte-range seeking through the host before introducing a player package.
-- [ ] Record the exact JsxCore entry conventions and resolved package versions in the architecture/reference documents.
+Evidence (2026-09-13): all items below completed. See [resolved conventions](../design/architecture.md#resolved-entry-conventions-validated-in-milestone-0) and [resolved versions](../references.md#resolved-implementation-versions-milestone-0-2026-09-13).
+
+- [x] Verify current .NET 10 SDK/runtime and select pinned stable package versions.
+- [x] Create the documented `src` projects and root `.slnx`; keep test projects beneath `src/Tests`.
+- [x] Configure shared build/package settings under `src`; verify building the root solution from that working directory respects SDK selection.
+- [x] Establish ASP.NET Core 10 controller API with ProblemDetails and one JsxCore TSX entry view using actual React.
+- [x] Demonstrate browser React state/hooks and a same-origin JSON request.
+- [x] Verify local production assets and no runtime CDN dependency.
+- [x] Publish and run on macOS; validate Linux container build/runtime with a tiny safe fixture.
+- [x] Exercise native video playback and byte-range seeking through the host before introducing a player package.
+- [x] Record the exact JsxCore entry conventions and resolved package versions in the architecture/reference documents.
 
 Exit evidence: reproducible restore/build/publish, rendered React page, JSON response, seeking in a fixture MP4, Linux asset delivery. No claim that the full application exists at this stage. If JsxCore cannot meet the stack, document the failing minimal case and resolve it without silent substitution.
+
+Recorded results: `dotnet build ../TutsVideoPlayer.slnx` from `src` resolves SDK 10.0.302 and builds clean with zero warnings; 13 integration tests plus 2 intentionally skipped placeholders pass. `dotnet publish -c Release` minifies 78 assets with esbuild. The published app and the Linux container (`dotnet/sdk:10.0.302` build, `dotnet/aspnet:10.0.10` runtime, non-root `APP_UID` with `--chown`) were verified in a real browser: hydration, same-origin fetch, and seeking to arbitrary positions with 206 partial-content responses on both hosts.
 
 ## M1: Persist and browse the library
 
@@ -138,7 +142,7 @@ Exit evidence: a usable personal learning workflow on the Mac plus a verified Li
 
 | Unknown | Resolve in | Required evidence |
 | --- | --- | --- |
-| Exact JsxCore production import/build conventions | M0 | Local and Linux build/browser run |
+| Exact JsxCore production import/build conventions | M0 (resolved) | Verified: local and Linux build plus browser run; see [resolved conventions](../design/architecture.md#resolved-entry-conventions-validated-in-milestone-0) |
 | Linux architecture, CPU, storage, permissions | M0/M6 | Target-host diagnostics and deployment test |
 | Whole-library codec variation | M1/M4 | Probe results and categorized unsupported cases |
 | TS/AAC timing quality | M4 | Real representative pair plus synthetic timing fixtures |
