@@ -2,7 +2,7 @@
 
 Status: agreed product direction; implementation specification. Updated 2026-09-13.
 
-This is the documentation for a personal tutorial-video library built with ASP.NET Core 10 Web API, JsxCore, and React. No application, solution, database, migration, container, or media conversion has been implemented. Creating these documents does not authorize implementation or changes to the video library.
+This is the documentation for a personal tutorial-video library built with ASP.NET Core 10 Web API, JsxCore, and React. Milestone 0 (stack validation) was implemented on 2026-09-13: the solution, host application, JsxCore/React entry view, health and demo endpoints, seekable media delivery, tests, and the Linux container path now exist. No library data, database, migration, or media conversion exists yet, and milestones M1–M7 remain planned.
 
 ## Reading order
 
@@ -41,7 +41,7 @@ Documentation-only checks are recorded in the [documentation review](implementat
 
 The PRDs describe observable behavior. Design documents describe mechanisms. ADRs explain durable trade-offs. The glossary contains only domain language. The implementation plan defines deliverables and evidence; its checkboxes intentionally remain incomplete.
 
-All documentation belongs under `docs`, including this glossary. Future application code, test code, scripts, project files, and container definitions belong under root-level `src`. The future root-level `TutsVideoPlayer.slnx` will sit beside `src` and `docs`. No empty solution or project scaffolding is needed during this documentation-only phase.
+All documentation belongs under `docs`, including this glossary. Application code, test code, scripts, project files, and container definitions live under root-level `src`, created in milestone 0. The root-level `TutsVideoPlayer.slnx` sits beside `src` and `docs`.
 
 ## Cross-cutting release conditions
 
