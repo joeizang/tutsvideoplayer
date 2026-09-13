@@ -26,6 +26,6 @@ public class HealthEndpointTests(TestApplication application)
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
         Assert.Contains("\"status\":\"Healthy\"", body);
-        Assert.Contains("milestone 1", body);
+        Assert.Contains("database", body);
     }
 }

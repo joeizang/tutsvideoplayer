@@ -3,16 +3,31 @@ using JsxCore;
 using JsxCore.Hosting;
 using JsxCore.Mvc;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using TutsVideoPlayer.Infrastructure.FileSystem;
+using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Home;
+using TutsVideoPlayer.Web.Features.Library;
 using TutsVideoPlayer.Web.Features.Playback;
-using TutsVideoPlayer.Web.Features.System;
+using TutsVideoPlayer.Web.Features.Watch;
 using TutsVideoPlayer.Web.Hosting;
+using TutsVideoPlayer.Infrastructure.FileSystem;
+using TutsVideoPlayer.Web.Features.System;
+using TutsVideoPlayer.Web.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddControllers();
+if (args.Any(arg => arg == "migrate"))
+{
+    await MigrateAndExitAsync(builder);
+    return;
+}
+
+builder.Services.AddControllers(mvcOptions =>
+{
+    // Applied to every controller so a future mutating endpoint is protected by default.
+    mvcOptions.Filters.Add<SameOriginMutationFilter>();
+});
 builder.Services.AddProblemDetails(options =>
 {
     options.CustomizeProblemDetails = context =>
@@ -20,6 +35,12 @@ builder.Services.AddProblemDetails(options =>
         context.ProblemDetails.Extensions.TryAdd("traceId", context.HttpContext.TraceIdentifier);
     };
 });
+builder.Services
+    .AddOptions<AppOptions>()
+    .BindConfiguration(AppOptions.SectionName)
+    .Validate(options => !string.IsNullOrWhiteSpace(options.LibraryRoot), "App:LibraryRoot must be configured.")
+    .Validate(options => !string.IsNullOrWhiteSpace(options.DataDirectory), "App:DataDirectory must be configured.")
+    .ValidateOnStart();
 builder.Services
     .AddOptions<MediaDeliveryOptions>()
     .BindConfiguration(MediaDeliveryOptions.SectionName)
@@ -34,7 +55,11 @@ builder.Services.AddSingleton<MediaFileLocator>(services =>
     return new MediaFileLocator(root);
 });
 builder.Services.AddSingleton<SystemInfoService>();
-builder.Services.AddHealthChecks().AddCheck<ApplicationReadinessCheck>("application", tags: ["ready"]);
+builder.Services.AddSingleton<SchemaReadiness>();
+var appOptions = builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions();
+builder.Services.AddCatalog(appOptions);
+builder.Services.AddHealthChecks()
+    .AddCheck<DatabaseReadinessCheck>("database", tags: ["ready"]);
 builder.AddJsxCore();
 
 var app = builder.Build();
@@ -67,4 +92,14 @@ app.Run();
 public partial class Program
 {
     internal static string DescribeRuntime() => RuntimeInformation.FrameworkDescription;
+
+    private static async Task MigrateAndExitAsync(WebApplicationBuilder builder)
+    {
+        builder.Services.AddCatalog(builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions());
+        using var app = builder.Build();
+        using var scope = app.Services.CreateScope();
+        var initializer = scope.ServiceProvider.GetRequiredService<DatabaseInitializer>();
+        await initializer.MigrateAsync();
+        Console.WriteLine("Database migration complete.");
+    }
 }

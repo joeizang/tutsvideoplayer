@@ -7,4 +7,23 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       ASPNETCORE_URLS: http://+:8080
+    volumes:
+      - application-data:/app/appdata
     restart: unless-stopped
+
+  # Explicit schema maintenance, never part of normal startup. Stop the service above and
+  # back up the data directory first, then:
+  #   docker compose --profile maintenance run --rm migrate
+  migrate:
+    profiles:
+      - maintenance
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["migrate"]
+    volumes:
+      - application-data:/app/appdata
+    restart: "no"
+
+volumes:
+  application-data:

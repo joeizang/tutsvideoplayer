@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestone 0 executed on 2026-09-13 with explicit user authorization; milestones M1–M7 remain planned. Every M1+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0 and 1 executed on 2026-09-13 with explicit user authorization; milestones M2–M7 remain planned. Every M2+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -32,19 +32,25 @@ Recorded results: `dotnet build ../TutsVideoPlayer.slnx` from `src` resolves SDK
 
 Dependencies: M0.
 
-- [ ] Define typed identities, relative-path validation, natural sort keys, and catalog availability rules.
-- [ ] Create EF configurations and the initial reviewed SQLite migration.
-- [ ] Implement explicit database initialization and normal startup schema checking.
-- [ ] Add safe root enumeration, symlink exclusion, extension classification, scan records, and partial-failure handling.
-- [ ] Probe representative media through a bounded subprocess adapter.
-- [ ] Discover courses, lesson folders, source components, and subtitle candidates.
-- [ ] Recognize TS/AAC pairs and exclude companion audio/support/cache files from lesson counts.
-- [ ] Reconcile unchanged paths without creating duplicate IDs; do not mark unavailable subtrees missing on failed scans.
-- [ ] Implement library/course/search/tree endpoints with projected no-tracking queries.
-- [ ] Build the home course list and watch-page lesson rail from real DTOs.
-- [ ] Add startup/manual scan status and empty/error states.
+Evidence (2026-09-13): all items below completed. Initial `InitialCatalog` migration reviewed (no shadow columns, restrict FKs, unique path indexes, check constraints). Read-only scan of the real library: 19 courses, 1,031 available lessons, 0 missing, 610 subtitle tracks, and the 34-lesson TS/AAC course — matching [decision provenance](../product/decisions.md) exactly.
+
+- [x] Define typed identities, relative-path validation, natural sort keys, and catalog availability rules.
+- [x] Create EF configurations and the initial reviewed SQLite migration.
+- [x] Implement explicit database initialization and normal startup schema checking.
+- [x] Add safe root enumeration, symlink exclusion, extension classification, scan records, and partial-failure handling.
+- [x] Probe representative media through a bounded subprocess adapter.
+- [x] Discover courses, lesson folders, source components, and subtitle candidates.
+- [x] Recognize TS/AAC pairs and exclude companion audio/support/cache files from lesson counts.
+- [x] Reconcile unchanged paths without creating duplicate IDs; do not mark unavailable subtrees missing on failed scans.
+- [x] Implement library/course/search/tree endpoints with projected no-tracking queries.
+- [x] Build the home course list and watch-page lesson rail from real DTOs.
+- [x] Add startup/manual scan status and empty/error states.
 
 Exit evidence: stable naturally ordered tree after repeated scans, correct fixture counts, retained missing history, bounded SQL command counts, no source changes. Run a read-only scan of the real library only within the later implementation scope and compare with current filesystem evidence.
+
+Recorded results: 43 Core tests and 62 integration tests pass, including stable lesson IDs across repeated scans, missing-lesson retention, failed-subtree protection, TS/AAC pairing, and SQL command budgets (course list ≤2, course tree ≤3 commands). The home course list and watch-page lesson rail were verified hydrated in a real browser on macOS.
+
+Post-review corrections (PR #2 review, [m1-library-review.md](../m1-library-review.md)): course rows link through a course entry route that resolves a lesson of that course; the probe cache is filtered to each lesson's current source generation; a failed reconciliation is rolled back before the failure is recorded, so failed scans stay retryable; every intermediate lesson folder is created before parents are linked; unresolved probe metadata and unknown fingerprints are retried instead of treated as cache hits; companion audio additions and removals are reconciled as source-set changes; source identity is decided by a complete SHA-256 content digest rather than size and probe hints alone; a running scan is observed when the page loads; the home course list is paginated; mutating requests are rejected unless they are same-origin JSON; the container entrypoint no longer migrates on startup; and the runtime image installs ffprobe. Follow-up validation built the Linux images and verified explicit migration followed by healthy web startup using the shared Compose database volume. A real-browser interruption/retry check verified scan-status recovery. Video and companion fingerprint failures now preserve the verified source set and retry on later scans, with regression coverage for both cases.
 
 ## M2: Direct playback and learning continuity
 
