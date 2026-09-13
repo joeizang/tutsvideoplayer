@@ -6,9 +6,10 @@ namespace TutsVideoPlayer.IntegrationTests;
 public class HomeViewTests(TestApplication application)
 {
     [Fact]
-    public async Task HomeReturnsServerRenderedHtmlWithHydrationPayload()
+    public async Task HomeReturnsServerRenderedCourseListWithHydrationPayload()
     {
         var client = application.CreateClient();
+        await application.EnsureCatalogScannedAsync();
 
         var response = await client.GetAsync("/", TestContext.Current.CancellationToken);
 
@@ -16,12 +17,14 @@ public class HomeViewTests(TestApplication application)
         Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
 
         var html = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
-        Assert.Contains("<h1>Tuts Video Player</h1>", html);
-        Assert.Contains("Host information", html);
+        Assert.Contains("<h1>Tutorial library</h1>", html);
+        Assert.Contains("Courses</h2>", html);
+        Assert.Contains("CourseAlpha", html);
+        Assert.Contains("CourseTS", html);
         Assert.Contains("application/json", html);
         Assert.Contains("jsxcore-model", html);
         Assert.Contains("mountView", html);
-        Assert.Contains("<title>Tuts Video Player</title>", html);
+        Assert.Contains("<title>Tutorial library</title>", html);
     }
 
     [Fact]

@@ -2,6 +2,7 @@ bin/
 obj/
 node_modules/
 publish/
+appdata/
 *.user
 .vs/
 .idea/

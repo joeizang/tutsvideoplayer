@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestone 0 executed on 2026-09-13 with explicit user authorization; milestones M1–M7 remain planned. Every M1+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0 and 1 executed on 2026-09-13 with explicit user authorization; milestones M2–M7 remain planned. Every M2+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -32,19 +32,23 @@ Recorded results: `dotnet build ../TutsVideoPlayer.slnx` from `src` resolves SDK
 
 Dependencies: M0.
 
-- [ ] Define typed identities, relative-path validation, natural sort keys, and catalog availability rules.
-- [ ] Create EF configurations and the initial reviewed SQLite migration.
-- [ ] Implement explicit database initialization and normal startup schema checking.
-- [ ] Add safe root enumeration, symlink exclusion, extension classification, scan records, and partial-failure handling.
-- [ ] Probe representative media through a bounded subprocess adapter.
-- [ ] Discover courses, lesson folders, source components, and subtitle candidates.
-- [ ] Recognize TS/AAC pairs and exclude companion audio/support/cache files from lesson counts.
-- [ ] Reconcile unchanged paths without creating duplicate IDs; do not mark unavailable subtrees missing on failed scans.
-- [ ] Implement library/course/search/tree endpoints with projected no-tracking queries.
-- [ ] Build the home course list and watch-page lesson rail from real DTOs.
-- [ ] Add startup/manual scan status and empty/error states.
+Evidence (2026-09-13): all items below completed. Initial `InitialCatalog` migration reviewed (no shadow columns, restrict FKs, unique path indexes, check constraints). Read-only scan of the real library: 19 courses, 1,031 available lessons, 0 missing, 610 subtitle tracks, and the 34-lesson TS/AAC course — matching [decision provenance](../product/decisions.md) exactly.
+
+- [x] Define typed identities, relative-path validation, natural sort keys, and catalog availability rules.
+- [x] Create EF configurations and the initial reviewed SQLite migration.
+- [x] Implement explicit database initialization and normal startup schema checking.
+- [x] Add safe root enumeration, symlink exclusion, extension classification, scan records, and partial-failure handling.
+- [x] Probe representative media through a bounded subprocess adapter.
+- [x] Discover courses, lesson folders, source components, and subtitle candidates.
+- [x] Recognize TS/AAC pairs and exclude companion audio/support/cache files from lesson counts.
+- [x] Reconcile unchanged paths without creating duplicate IDs; do not mark unavailable subtrees missing on failed scans.
+- [x] Implement library/course/search/tree endpoints with projected no-tracking queries.
+- [x] Build the home course list and watch-page lesson rail from real DTOs.
+- [x] Add startup/manual scan status and empty/error states.
 
 Exit evidence: stable naturally ordered tree after repeated scans, correct fixture counts, retained missing history, bounded SQL command counts, no source changes. Run a read-only scan of the real library only within the later implementation scope and compare with current filesystem evidence.
+
+Recorded results: 24 Core tests and 44 integration tests pass, including stable lesson IDs across repeated scans, missing-lesson retention, failed-subtree protection, TS/AAC pairing, and SQL command budgets (course list ≤2, course tree ≤3 commands). The home course list and watch-page lesson rail were verified hydrated in a real browser on macOS, and the Linux container applies the migrate command on startup before serving.
 
 ## M2: Direct playback and learning continuity
 

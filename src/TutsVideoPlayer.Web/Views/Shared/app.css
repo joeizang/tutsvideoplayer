@@ -1,0 +1,378 @@
+:root {
+    color-scheme: light;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+    --canvas: #f3f6fa;
+    --surface: #ffffff;
+    --ink: #182b45;
+    --ink-secondary: #53657b;
+    --action: #245fc7;
+    --completion: #23664c;
+    --border: rgba(24, 43, 69, 0.14);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+}
+
+a {
+    color: var(--action);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.app-shell {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+}
+
+.library-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.library-header h1 {
+    margin: 0 0 0.25rem;
+    font-size: 1.75rem;
+}
+
+.subtitle {
+    margin: 0;
+    color: var(--ink-secondary);
+    font-size: 0.9rem;
+}
+
+.scan-notice,
+.scan-error {
+    margin: 0 0 1rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--ink-secondary);
+    font-size: 0.9rem;
+}
+
+.scan-error {
+    color: #a4262c;
+    border-color: rgba(164, 38, 44, 0.3);
+}
+
+section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+section h2 {
+    margin: 0;
+    font-size: 1.05rem;
+}
+
+.search-form {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.search-form input {
+    font: inherit;
+    padding: 0.4rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-width: 16rem;
+}
+
+.course-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.course-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.65rem 0.25rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.course-row:last-child {
+    border-bottom: none;
+}
+
+.course-row a {
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.course-row a:hover {
+    color: var(--action);
+    text-decoration: underline;
+}
+
+.course-missing .course-title a {
+    color: var(--ink-secondary);
+}
+
+.course-counts {
+    color: var(--ink-secondary);
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.empty-state p,
+.empty-search {
+    color: var(--ink-secondary);
+}
+
+button {
+    font: inherit;
+    padding: 0.45rem 0.9rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #eef1f5;
+    color: var(--ink);
+    cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+    background: #e2e7ee;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.refresh-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.error {
+    color: #a4262c;
+}
+
+.watch-shell {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.watch-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.25rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.back-link {
+    font-weight: 600;
+}
+
+.watch-course {
+    color: var(--ink-secondary);
+}
+
+.watch-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+}
+
+.lesson-rail {
+    width: 300px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    padding: 1rem;
+    overflow-y: auto;
+}
+
+.rail-title {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+}
+
+.rail-missing-note {
+    color: #a4262c;
+    font-size: 0.85rem;
+}
+
+.rail-list {
+    list-style: none;
+    margin: 0;
+    padding-left: 0;
+}
+
+.rail-list .rail-list {
+    padding-left: 1rem;
+}
+
+.rail-folder {
+    display: inline-block;
+    border: none;
+    background: none;
+    padding: 0.2rem 0;
+    font-weight: 600;
+    color: var(--ink);
+    cursor: pointer;
+}
+
+.rail-list a {
+    display: inline-block;
+    padding: 0.2rem 0.35rem;
+    border-radius: 6px;
+    color: var(--ink);
+}
+
+.rail-list a:hover {
+    background: rgba(36, 95, 199, 0.08);
+    text-decoration: none;
+}
+
+.rail-current a {
+    background: var(--action);
+    color: #ffffff;
+}
+
+.rail-missing {
+    color: #a4262c;
+    font-size: 0.8rem;
+}
+
+.rail-current .rail-missing {
+    color: #ffd7d9;
+}
+
+.watch-main {
+    flex: 1;
+    padding: 1.5rem 2rem;
+    min-width: 0;
+}
+
+.watch-main h1 {
+    margin: 0 0 1rem;
+    font-size: 1.25rem;
+}
+
+.missing-note {
+    color: #a4262c;
+    background: var(--surface);
+    border: 1px solid rgba(164, 38, 44, 0.3);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+}
+
+.player-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 16 / 9;
+    max-width: 640px;
+    background: #000000;
+    color: #9aa2ad;
+    border-radius: 8px;
+    margin-bottom: 1.25rem;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.35rem 1rem;
+    margin: 0 0 1.25rem;
+    max-width: 40rem;
+}
+
+.info-grid dt {
+    font-weight: 600;
+    color: var(--ink-secondary);
+}
+
+.info-grid dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.lesson-nav {
+    display: flex;
+    justify-content: space-between;
+    max-width: 40rem;
+}
+
+.lesson-nav-link {
+    font-weight: 600;
+}
+
+@media (max-width: 900px) {
+    .watch-body {
+        flex-direction: column;
+    }
+
+    .lesson-rail {
+        width: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        max-height: 40vh;
+    }
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+        --canvas: #14161a;
+        --surface: #1d2026;
+        --ink: #e6e8eb;
+        --ink-secondary: #9aa2ad;
+        --action: #6f9ff0;
+        --border: rgba(230, 232, 235, 0.14);
+    }
+
+    .course-row a {
+        color: var(--ink);
+    }
+
+    button {
+        background: #262b33;
+        border-color: #3d434d;
+        color: inherit;
+    }
+
+    .rail-current a {
+        background: #2b4d8f;
+        color: #ffffff;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        transition: none !important;
+    }
+}

@@ -33,7 +33,7 @@ Pinned in `src/global.json` and `src/Directory.Packages.props`, and in the Web p
 | React / ReactDOM | 19.3.0 |
 | TypeScript (native compiler, restored by the build) | 7.x |
 | esbuild (Release minifier, restored by the build) | 0.28.2 |
-| EF Core / SQLite / Design (pinned ahead of M1) | 10.0.12 |
+| EF Core / SQLite / Design / dotnet-ef | 10.0.12 |
 | Microsoft.AspNetCore.Mvc.Testing | 10.0.12 |
 | xunit.v3 / xunit.runner.visualstudio | 3.2.2 / 3.1.5 |
 | Microsoft.NET.Test.Sdk | 18.10.0 |

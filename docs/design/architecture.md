@@ -60,9 +60,8 @@ tutsvideoplayer/
     │   │   └── Settings/
 │   ├── Hosting/
 │   │   └── ...                    # health checks and registration helpers
-│   ├── Views/                     # JsxCore TSX entry views and their stylesheets
+│   ├── Views/                     # JsxCore TSX entry views, shared components, and stylesheets
 │   ├── Media/                     # synthetic demo fixtures served through media endpoints
-│   ├── Client/                    # React components, hooks, styles; arrives with the first shared components (M2)
 │   └── wwwroot/                   # bundled public assets only
 │   ├── Tests/
 │   │   ├── TutsVideoPlayer.Core.Tests/
@@ -122,6 +121,7 @@ The spike used JsxCore 1.0.2 with `<JsxCoreFramework>react</JsxCoreFramework>`, 
 - Release publish emits precompiled minified assets. React's "dead code elimination has not been applied" console error is a Debug-build artifact and does not appear in Release.
 - The runtime writes generated modules under the content root's `obj/JsxCore`, so containers must run as a user that owns the published output (`COPY --chown=$APP_UID`); a root-owned copy fails startup with `UnauthorizedAccessException`.
 - Integration tests share one `WebApplicationFactory` in a single xunit collection: concurrent hosts in one process race on JsxCore's stylesheet staging directory (`obj/JsxCore/js/_dist/.staging`) and fail intermittently.
+- Shared React components and stylesheets live under `Views/Shared`: JsxCore refuses relative imports that resolve outside the views directory, so the planned top-level `Client/` folder is folded into the views tree (recorded in milestone 1).
 
 ## Concurrency and lifetime rules
 

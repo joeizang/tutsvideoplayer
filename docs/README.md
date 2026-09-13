@@ -2,7 +2,7 @@
 
 Status: agreed product direction; implementation specification. Updated 2026-09-13.
 
-This is the documentation for a personal tutorial-video library built with ASP.NET Core 10 Web API, JsxCore, and React. Milestone 0 (stack validation) was implemented on 2026-09-13: the solution, host application, JsxCore/React entry view, health and demo endpoints, seekable media delivery, tests, and the Linux container path now exist. No library data, database, migration, or media conversion exists yet, and milestones M1–M7 remain planned.
+This is the documentation for a personal tutorial-video library built with ASP.NET Core 10 Web API, JsxCore, and React. Milestones 0 (stack validation) and 1 (persist and browse the library) were implemented on 2026-09-13: the solution, host application, JsxCore/React interface with a real catalog backed by SQLite, library scanning with reconciliation, health and demo endpoints, seekable media delivery, tests, and the Linux container path now exist. Milestones M2–M7 remain planned.
 
 ## Reading order
 

@@ -1,74 +1,94 @@
 import { useState } from "react";
 import type { ViewProps } from "dotnet:rendering";
-import type { SystemInfoModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
-import "./Index.css";
+import type { LibraryHomeModel, CourseSummaryModel, ScanStatusModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
+import { RefreshLibraryButton } from "../Shared/RefreshLibraryButton.tsx";
+import "../Shared/app.css";
 
-export const head = {
-    title: "Tuts Video Player",
+export const head = (model: LibraryHomeModel) => ({
+    title: model.summary.libraryName,
     links: [{ rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }]
-};
+});
 
-export default function Index({ model }: ViewProps<SystemInfoModel>) {
-    const [info, setInfo] = useState<SystemInfoModel>(model);
-    const [refreshCount, setRefreshCount] = useState(0);
-    const [fetching, setFetching] = useState(false);
-    const [loadError, setLoadError] = useState<string | null>(null);
+function scanLabel(scan: ScanStatusModel | null | undefined): string | null {
+    if (!scan) return null;
+    if (scan.state === "Running") return "Scanning library…";
+    if (scan.state === "Failed") return "Last scan failed";
+    if (scan.state === "Canceled") return "Last scan was canceled";
+    return `Library scanned (${scan.discoveredCount} lessons)`;
+}
 
-    const refresh = async () => {
-        setFetching(true);
-        setLoadError(null);
-        try {
-            const response = await fetch("/api/v1/system/info");
-            if (!response.ok) {
-                throw new Error(`Request failed with status ${response.status}`);
-            }
-            setInfo(await response.json());
-            setRefreshCount((count) => count + 1);
-        } catch (error) {
-            setLoadError(error instanceof Error ? error.message : "Request failed");
-        } finally {
-            setFetching(false);
-        }
-    };
+export default function Index({ model }: ViewProps<LibraryHomeModel>) {
+    const [summary] = useState(model.summary);
+    const courses = model.courses;
+    const query = model.searchQuery;
+    const scanNotice = scanLabel(summary.latestScan);
 
     return (
         <main className="app-shell">
-            <header>
-                <h1>Tuts Video Player</h1>
-                <p className="subtitle">Milestone 0: stack validation</p>
+            <header className="library-header">
+                <div>
+                    <h1>{summary.libraryName}</h1>
+                    <p className="subtitle">
+                        {summary.courseCount} courses · {summary.availableLessonCount} lessons available
+                        {summary.missingLessonCount > 0 ? ` · ${summary.missingLessonCount} missing` : ""}
+                    </p>
+                </div>
+                <RefreshLibraryButton initialScanState={summary.latestScan?.state ?? null} />
             </header>
 
-            <section aria-labelledby="system-heading">
-                <h2 id="system-heading">Host information</h2>
-                <dl className="info-grid">
-                    <dt>Application</dt>
-                    <dd>{info.applicationName}</dd>
-                    <dt>Runtime</dt>
-                    <dd>{info.runtimeDescription}</dd>
-                    <dt>Operating system</dt>
-                    <dd>{info.operatingSystem}</dd>
-                    <dt>Fixture size</dt>
-                    <dd>{info.fixtureAvailable ? `${info.fixtureSizeBytes} bytes` : "fixture missing"}</dd>
-                    <dt>Same-origin fetches</dt>
-                    <dd>{refreshCount}</dd>
-                </dl>
-                <button type="button" onClick={refresh} disabled={fetching}>
-                    {fetching ? "Fetching…" : "Fetch from API"}
-                </button>
-                {loadError ? (
-                    <p role="alert" className="error">{loadError}</p>
-                ) : null}
-            </section>
+            {scanNotice ? <p className={summary.latestScan?.state === "Failed" ? "scan-error" : "scan-notice"}>{scanNotice}</p> : null}
 
-            <section aria-labelledby="playback-heading">
-                <h2 id="playback-heading">Native playback and byte-range seeking</h2>
-                {info.fixtureAvailable ? (
-                    <video className="fixture-video" controls preload="metadata" src={info.fixtureMediaUrl} />
-                ) : (
-                    <p role="alert">The demo fixture is not available on this host.</p>
-                )}
-                <p className="hint">Seek in the video: the browser issues Range requests the host answers with 206 partial content.</p>
-            </section>
+            {summary.courseCount === 0 ? (
+                <section className="empty-state" aria-live="polite">
+                    <h2>No courses yet</h2>
+                    <p>
+                        The library is scanned on startup and on refresh. Each top-level folder inside the
+                        configured library root that contains discoverable videos becomes a course.
+                    </p>
+                </section>
+            ) : (
+                <section aria-labelledby="courses-heading">
+                    <div className="section-header">
+                        <h2 id="courses-heading">Courses</h2>
+                        <form className="search-form" method="get" action="/" role="search">
+                            <input
+                                type="search"
+                                name="q"
+                                defaultValue={query ?? ""}
+                                placeholder="Search courses and lessons"
+                                aria-label="Search courses and lessons"
+                            />
+                            <button type="submit">Search</button>
+                        </form>
+                    </div>
+
+                    {query !== null && courses.length === 0 ? (
+                        <p className="empty-search">
+                            No courses or lessons match “{query}”. <a href="/">Clear search</a>
+                        </p>
+                    ) : (
+                        <ul className="course-list">
+                            {courses.map((course) => (
+                                <CourseRow key={course.id} course={course} />
+                            ))}
+                        </ul>
+                    )}
+                </section>
+            )}
         </main>
+    );
+}
+
+function CourseRow({ course }: { course: CourseSummaryModel }) {
+    return (
+        <li className={course.available ? "course-row" : "course-row course-missing"}>
+            <span className="course-title">
+                <a href={`/watch/${course.id}`}>{course.title}</a>
+            </span>
+            <span className="course-counts">
+                {course.availableLessonCount} of {course.lessonCount} lessons available
+                {course.missingLessonCount > 0 ? ` · ${course.missingLessonCount} missing` : ""}
+            </span>
+        </li>
     );
 }
