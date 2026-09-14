@@ -25,8 +25,8 @@ public class WatchViewTests(TestApplication application)
         var html = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
         Assert.Contains("Getting Started", html);
         Assert.Contains("CourseAlpha", html);
-        Assert.Contains("lesson-rail", html);
-        Assert.Contains("Playback arrives in milestone 2", html);
+        Assert.Contains("Course lessons", html);
+        Assert.Contains("no ready playable rendition", html);
         Assert.Contains("02 Getting Started.mp4", html);
         Assert.Contains("/watch/", html);
     }

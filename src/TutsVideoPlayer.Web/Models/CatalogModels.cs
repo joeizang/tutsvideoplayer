@@ -44,6 +44,7 @@ public sealed record CourseSummaryModel(
     [property: JsonPropertyName("lessonCount")] int LessonCount,
     [property: JsonPropertyName("availableLessonCount")] int AvailableLessonCount,
     [property: JsonPropertyName("missingLessonCount")] int MissingLessonCount,
+    [property: JsonPropertyName("completedLessonCount")] int CompletedLessonCount,
     [property: JsonPropertyName("available")] bool Available);
 
 public sealed record CourseListModel(
@@ -60,6 +61,7 @@ public sealed record CourseTreeNodeModel(
     [property: JsonPropertyName("sortKey")] string SortKey,
     [property: JsonPropertyName("folderId")] string? FolderId,
     [property: JsonPropertyName("available")] bool? Available,
+    [property: JsonPropertyName("completed")] bool? Completed,
     [property: JsonPropertyName("filename")] string? Filename,
     [property: JsonPropertyName("durationMs")] long? DurationMs);
 
@@ -92,6 +94,7 @@ public sealed record LessonDetailModel(
 public sealed record LibraryHomeModel(
     [property: JsonPropertyName("summary")] LibrarySummaryModel Summary,
     [property: JsonPropertyName("courses")] IReadOnlyList<CourseSummaryModel> Courses,
+    [property: JsonPropertyName("continueEntries")] IReadOnlyList<ContinueLearningEntryModel> ContinueEntries,
     [property: JsonPropertyName("searchQuery")] string? SearchQuery,
     [property: JsonPropertyName("page")] int Page,
     [property: JsonPropertyName("pageSize")] int PageSize,
@@ -99,4 +102,5 @@ public sealed record LibraryHomeModel(
 
 public sealed record WatchLessonModel(
     [property: JsonPropertyName("lesson")] LessonDetailModel Lesson,
-    [property: JsonPropertyName("rail")] CourseTreeModel Rail);
+    [property: JsonPropertyName("rail")] CourseTreeModel Rail,
+    [property: JsonPropertyName("manifest")] PlaybackManifestModel? Manifest);

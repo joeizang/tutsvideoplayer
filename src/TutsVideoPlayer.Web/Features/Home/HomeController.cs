@@ -1,16 +1,16 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using JsxCore;
 using JsxCore.Hosting;
 using JsxCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using TutsVideoPlayer.Infrastructure.Persistence;
+using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Models;
 
 namespace TutsVideoPlayer.Web.Features.Home;
 
-public sealed class HomeController(AppDbContext context) : Controller
+public sealed class HomeController(AppDbContext context, LearningService learning) : Controller
 {
     private const int DefaultCoursePageSize = 24;
     private const int MaximumCoursePageSize = 100;
@@ -63,8 +63,15 @@ public sealed class HomeController(AppDbContext context) : Controller
                 course.Lessons.Count(),
                 course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available),
                 course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Missing),
+                course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available
+                    && context.LessonProgress.Any(progress => progress.LessonId == lesson.Id
+                        && progress.SourceGeneration == lesson.SourceGeneration
+                        && (progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
+                            || (progress.ManualCompletion == null && progress.AutomaticCompleted)))),
                 course.Availability == Core.Catalog.CatalogAvailability.Available))
             .ToListAsync(cancellationToken);
+
+        var continueEntries = await learning.ContinueLearningAsync(5, cancellationToken);
 
         var model = new LibraryHomeModel(
             new LibrarySummaryModel(
@@ -87,6 +94,7 @@ public sealed class HomeController(AppDbContext context) : Controller
                         latest.CatalogRevision),
                 new LibraryStatusModel(true, true, true)),
             courses,
+            continueEntries,
             searchQuery,
             page,
             effectivePageSize,

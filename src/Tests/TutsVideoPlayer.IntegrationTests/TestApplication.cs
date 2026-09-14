@@ -41,12 +41,25 @@ public sealed class TestApplication : WebApplicationFactory<Program>, IAsyncLife
         var client = CreateClient();
         var start = await client.StartScanAsync(TestContext.Current.CancellationToken);
         var started = await start.Content.ReadFromJsonAsync<ScanStartResultModel>(cancellationToken: TestContext.Current.CancellationToken);
+        return await WaitForScanCompletionAsync(client, started!.ScanRunId);
+    }
+
+    public static async Task<ScanStatusModel> WaitForScanCompletionAsync(HttpClient client, string scanRunId)
+    {
         var deadline = DateTime.UtcNow.AddSeconds(120);
         while (DateTime.UtcNow < deadline)
         {
-            var scan = await client.GetFromJsonAsync<ScanStatusModel>($"/api/v1/library/scans/{started!.ScanRunId}", TestContext.Current.CancellationToken);
+            var scan = await client.GetFromJsonAsync<ScanStatusModel>($"/api/v1/library/scans/{scanRunId}", TestContext.Current.CancellationToken);
             if (scan is not null && scan.State != "Running")
             {
+                if (scan.State != "Succeeded")
+                {
+                    var issues = await client.GetStringAsync(
+                        $"/api/v1/library/scans/{scanRunId}/issues?page=1&pageSize=20", TestContext.Current.CancellationToken);
+                    throw new Xunit.Sdk.XunitException(
+                        $"Scan {scanRunId} ended as '{scan.State}' with {scan.IssueCount} issue(s): {issues}");
+                }
+
                 return scan;
             }
 

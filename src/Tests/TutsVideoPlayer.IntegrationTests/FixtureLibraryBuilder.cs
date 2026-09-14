@@ -4,9 +4,23 @@ namespace TutsVideoPlayer.IntegrationTests;
 
 public static class FixtureLibraryBuilder
 {
+    private static string? FindDemoFixture() =>
+        new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "TutsVideoPlayer.Web", "Media", "demo-fixture.mp4")
+        }.FirstOrDefault(File.Exists);
+
     public static string Build(string rootDirectory)
     {
         Directory.CreateDirectory(rootDirectory);
+
+        var demoFixture = FindDemoFixture();
+        if (demoFixture is not null)
+        {
+            var realCourse = Path.Combine(rootDirectory, "RealCourse");
+            Directory.CreateDirectory(realCourse);
+            File.Copy(demoFixture, Path.Combine(realCourse, "01 Real Lesson.mp4"));
+        }
 
         var alpha = Path.Combine(rootDirectory, "CourseAlpha");
         WriteFile(Path.Combine(alpha, "01 Intro", "02 Getting Started.mp4"), [1, 2, 3, 4]);
@@ -28,6 +42,12 @@ public static class FixtureLibraryBuilder
         WriteFile(Path.Combine(subsCourse, "video.srt"), Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nhi\n"));
         WriteFile(Path.Combine(subsCourse, "video.vtt"), Encoding.UTF8.GetBytes("WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n"));
         WriteFile(Path.Combine(subsCourse, "unrelated.srt"), Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nhi\n"));
+        WriteFile(Path.Combine(subsCourse, "broken.srt"), Encoding.UTF8.GetBytes("1\nnot a timing line\ntext\n"));
+
+        WriteFile(Path.Combine(alpha, "01 Intro", "Subtitles", "02 Getting Started.srt"),
+            Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nfolder cue\n"));
+        WriteFile(Path.Combine(alpha, "03 Setup", "10 Advanced.en.srt"),
+            Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nenglish cue\n"));
 
         var empty = Path.Combine(rootDirectory, "EmptyDirectory");
         Directory.CreateDirectory(empty);

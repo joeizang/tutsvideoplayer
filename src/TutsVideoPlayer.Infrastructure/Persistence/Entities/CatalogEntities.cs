@@ -82,8 +82,38 @@ public sealed class SubtitleTrackEntity
     public long LengthBytes { get; set; }
     public long ModifiedUtcMs { get; set; }
     public string ParseStatus { get; set; } = "Discovered";
+    public string? ParseError { get; set; }
+    public string? Fingerprint { get; set; }
+    public string? NormalizedRelativePath { get; set; }
+    public string? NormalizationVersion { get; set; }
+
+    /// <summary>
+    /// A track whose sidecar has disappeared is kept and marked missing rather than deleted,
+    /// so a manual subtitle preference is not silently forgotten with the catalog row.
+    /// </summary>
+    public CatalogAvailability Availability { get; set; }
+
+    /// <summary>
+    /// Size and modification time of the source file at the moment it was normalized. They are
+    /// compared before a cached artifact is served, so an edited sidecar stops serving the old
+    /// captions even when nothing else about the row changed.
+    /// </summary>
+    public long? NormalizedSourceLengthBytes { get; set; }
+    public long? NormalizedSourceModifiedUtcMs { get; set; }
 
     public CourseEntity Course { get; set; } = null!;
+}
+
+public sealed class SubtitleAssociationEntity
+{
+    public long LessonId { get; set; }
+    public long SubtitleTrackId { get; set; }
+    public SubtitleAssociationOrigin Origin { get; set; }
+    public int Priority { get; set; }
+    public int? SourceGeneration { get; set; }
+
+    public LessonEntity Lesson { get; set; } = null!;
+    public SubtitleTrackEntity Track { get; set; } = null!;
 }
 
 public sealed class ScanRunEntity

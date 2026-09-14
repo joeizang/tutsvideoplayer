@@ -81,7 +81,7 @@ Do not expose guessed remaining seconds when duration/progress is unknown. Label
 
 ## Concurrency and idempotency
 
-Settings/completion updates require an ETag/If-Match revision; return current revision on conflict. Progress has a separate session/sequence protocol because frequent playback saves should not collide with unrelated settings. Duplicate progress sequences acknowledge without replaying state changes. Do not treat a stale session as a successful position save.
+Settings/completion updates require an ETag/If-Match revision; return current revision on conflict. A missing or unparseable precondition is refused with 428 and the current revision, never treated as "no precondition". Progress has a separate session/sequence protocol because frequent playback saves should not collide with unrelated settings. Duplicate progress sequences acknowledge without replaying state changes. Do not treat a stale session as a successful position save. A write that loses an optimistic-concurrency race is reloaded and re-evaluated against the committed state; if it keeps losing, it is reported as a retryable 409 rather than a server error.
 
 Preparation uniqueness is server-derived, not trusted from a client idempotency string. Import apply includes the preview ID, content digest, expected catalog/progress revisions, and explicit conflict resolutions. Repeated apply returns its recorded result. A changed catalog invalidates the preview before any rows are changed.
 

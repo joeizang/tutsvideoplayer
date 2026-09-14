@@ -38,6 +38,7 @@ Pinned in `src/global.json` and `src/Directory.Packages.props`, and in the Web p
 | xunit.v3 / xunit.runner.visualstudio | 3.2.2 / 3.1.5 |
 | Microsoft.NET.Test.Sdk | 18.10.0 |
 | Container images | `dotnet/sdk:10.0.302`, `dotnet/aspnet:10.0.10` |
+| Tailwind CSS (CLI, build-time; output committed) | 4.3.3 |
 
 ## Primary technical references
 

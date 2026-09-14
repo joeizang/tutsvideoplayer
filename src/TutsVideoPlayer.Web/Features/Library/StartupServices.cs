@@ -62,6 +62,13 @@ public sealed class StartupScanService(
     {
         try
         {
+            // Recovery must run before any client can create a fresh scan, otherwise the
+            // boot-time sweep would mistake a live scan for an abandoned one.
+            if (readiness.IsReady)
+            {
+                await coordinator.RecoverAbandonedScansAsync(stoppingToken);
+            }
+
             await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
 
             if (!readiness.IsReady)
@@ -70,7 +77,6 @@ public sealed class StartupScanService(
                 return;
             }
 
-            await coordinator.RecoverAbandonedScansAsync(stoppingToken);
             var result = await coordinator.StartOrJoinAsync(stoppingToken);
             logger.LogInformation("Startup scan {ScanRunId} {Mode}.", result.ScanRunId, result.Joined ? "joined an existing run" : "started");
         }

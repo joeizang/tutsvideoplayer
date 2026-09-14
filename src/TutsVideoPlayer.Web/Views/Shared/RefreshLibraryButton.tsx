@@ -43,17 +43,15 @@ export function RefreshLibraryButton({
             await pollUntilFinished(scanRunId);
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : "The scan status could not be read.");
-            // A transport failure says nothing about the server-side scan. Keep its ID
-            // and enable an explicit retry rather than leaving Refresh disabled forever.
             setScanState("Unknown");
         } finally {
             observing.current = false;
         }
     };
 
-    // A scan started by application startup, or by another browser tab, is already running
-    // when this page loads. Without this the button would sit disabled at "Scanning…"
-    // forever, because polling was only reachable from the disabled button's click handler.
+    // A scan started by application startup, or by another tab, is already running when this
+    // page loads. Polling has to begin on mount: it cannot be reachable only from the click
+    // handler of a button this state disables, or the page shows "Scanning…" forever.
     useEffect(() => {
         if (initialScanState === "Running" && initialScanRunId) {
             void observe(initialScanRunId);
@@ -70,10 +68,7 @@ export function RefreshLibraryButton({
         try {
             const response = await fetch("/api/v1/library/scans", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-TutsVideoPlayer-Request": "1"
-                }
+                headers: { "X-TutsVideoPlayer-Request": "same-origin" }
             });
             if (!response.ok) {
                 throw new Error(`Request failed with status ${response.status}`);
@@ -90,13 +85,16 @@ export function RefreshLibraryButton({
     };
 
     return (
-        <span className="refresh-control">
-            <button type="button" onClick={refresh} disabled={scanning}>
+        <span className="inline-flex items-center gap-2">
+            <button
+                type="button"
+                onClick={() => void refresh()}
+                disabled={scanning}
+                className="rounded-lg border border-ink/15 bg-surface px-3 py-1.5 text-sm font-semibold text-ink hover:bg-canvas disabled:opacity-60 disabled:cursor-wait dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700"
+            >
                 {scanning ? "Scanning…" : scanState === "Unknown" ? "Retry scan status" : "Refresh library"}
             </button>
-            {error ? (
-                <span role="alert" className="error">{error}</span>
-            ) : null}
+            {error ? <span role="alert" className="text-sm text-danger dark:text-red-400">{error}</span> : null}
         </span>
     );
 }

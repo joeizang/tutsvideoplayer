@@ -161,6 +161,51 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                     b.ToTable("LessonFolders", (string)null);
                 });
 
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonProgressEntity", b =>
+                {
+                    b.Property<long>("LessonId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SourceGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ActiveSessionId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("AutomaticCompleted")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastWatchedUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("ManualCompletion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("MaxObservedPositionMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PositionMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("LessonId", "SourceGeneration");
+
+                    b.HasIndex("LastWatchedUtcMs");
+
+                    b.ToTable("LessonProgress", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_LessonProgress_LastSequence", "LastSequence >= 0");
+
+                            t.HasCheckConstraint("CK_LessonProgress_PositionMs", "PositionMs >= 0");
+                        });
+                });
+
             modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.LibraryEntity", b =>
                 {
                     b.Property<long>("Id")
@@ -191,6 +236,155 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("Libraries", (string)null);
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.PlaybackSessionEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ActiveRenditionId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ClosedUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastHeartbeatUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LessonId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SourceGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("StartedUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LastHeartbeatUtcMs");
+
+                    b.HasIndex("LessonId", "LastHeartbeatUtcMs");
+
+                    b.ToTable("PlaybackSessions", (string)null);
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.PreferenceEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Autoplay")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CacheLimitBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("FitMode")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("PlaybackSpeed")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("PreferredLanguage")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PreferredQuality")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("QueuePaused")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("SubtitleEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Preferences", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Preferences_CacheLimitBytes", "CacheLimitBytes >= 0");
+                        });
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.RenditionEntity", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AudioCodec")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ByteLength")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("Height")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastAccessUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LessonId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ManifestPath")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OutputHash")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Profile")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Purpose")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RecipeVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RelativePath")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("RetentionClass")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("SourceGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("VideoCodec")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Width")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RelativePath");
+
+                    b.HasIndex("Status", "RetentionClass");
+
+                    b.HasIndex("LessonId", "SourceGeneration", "Purpose", "Profile", "RecipeVersion")
+                        .IsUnique();
+
+                    b.ToTable("Renditions", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Renditions_ByteLength", "ByteLength >= 0");
+                        });
                 });
 
             modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.ScanIssueEntity", b =>
@@ -296,14 +490,44 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.SubtitleAssociationEntity", b =>
+                {
+                    b.Property<long>("LessonId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("SubtitleTrackId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Origin")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("SourceGeneration")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("LessonId", "SubtitleTrackId");
+
+                    b.HasIndex("SubtitleTrackId");
+
+                    b.ToTable("SubtitleAssociations", (string)null);
+                });
+
             modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.SubtitleTrackEntity", b =>
                 {
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("Availability")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("CourseId")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Fingerprint")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("Format")
                         .IsRequired()
@@ -318,6 +542,21 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                     b.Property<long>("ModifiedUtcMs")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("NormalizationVersion")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NormalizedRelativePath")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("NormalizedSourceLengthBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("NormalizedSourceModifiedUtcMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ParseError")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ParseStatus")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -328,10 +567,10 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CourseId");
-
                     b.HasIndex("RelativePath")
                         .IsUnique();
+
+                    b.HasIndex("CourseId", "Availability");
 
                     b.ToTable("SubtitleTracks", (string)null);
                 });
@@ -381,6 +620,39 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                     b.Navigation("ParentFolder");
                 });
 
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonProgressEntity", b =>
+                {
+                    b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonEntity", "Lesson")
+                        .WithMany()
+                        .HasForeignKey("LessonId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Lesson");
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.PlaybackSessionEntity", b =>
+                {
+                    b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonEntity", "Lesson")
+                        .WithMany()
+                        .HasForeignKey("LessonId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Lesson");
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.RenditionEntity", b =>
+                {
+                    b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonEntity", "Lesson")
+                        .WithMany()
+                        .HasForeignKey("LessonId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Lesson");
+                });
+
             modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.ScanIssueEntity", b =>
                 {
                     b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.ScanRunEntity", "ScanRun")
@@ -401,6 +673,25 @@ namespace TutsVideoPlayer.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Lesson");
+                });
+
+            modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.SubtitleAssociationEntity", b =>
+                {
+                    b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.LessonEntity", "Lesson")
+                        .WithMany()
+                        .HasForeignKey("LessonId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("TutsVideoPlayer.Infrastructure.Persistence.Entities.SubtitleTrackEntity", "Track")
+                        .WithMany()
+                        .HasForeignKey("SubtitleTrackId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Lesson");
+
+                    b.Navigation("Track");
                 });
 
             modelBuilder.Entity("TutsVideoPlayer.Infrastructure.Persistence.Entities.SubtitleTrackEntity", b =>

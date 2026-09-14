@@ -7,11 +7,12 @@ using JsxCore.Hosting;
 using JsxCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using TutsVideoPlayer.Infrastructure.Persistence;
+using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Models;
 
 namespace TutsVideoPlayer.Web.Features.Watch;
 
-public sealed class WatchController(AppDbContext context) : Controller
+public sealed class WatchController(AppDbContext context, LearningService learning) : Controller
 {
     [HttpGet("/watch/{lessonId:long}")]
     public async Task<IActionResult> Lesson(long lessonId, CancellationToken cancellationToken)
@@ -54,6 +55,7 @@ public sealed class WatchController(AppDbContext context) : Controller
                 folder.ParentFolderId.HasValue ? folder.ParentFolderId.Value.ToString(CultureInfo.InvariantCulture) : null,
                 null,
                 null,
+                null,
                 null))
             .ToListAsync(cancellationToken);
 
@@ -68,6 +70,10 @@ public sealed class WatchController(AppDbContext context) : Controller
                 candidate.SortKey,
                 candidate.FolderId.HasValue ? candidate.FolderId.Value.ToString(CultureInfo.InvariantCulture) : null,
                 candidate.Availability == Core.Catalog.CatalogAvailability.Available,
+                context.LessonProgress.Any(progress => progress.LessonId == candidate.Id
+                    && progress.SourceGeneration == candidate.SourceGeneration
+                    && (progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
+                        || (progress.ManualCompletion == null && progress.AutomaticCompleted))),
                 candidate.PrimaryRelativePath,
                 candidate.DurationMs))
             .ToListAsync(cancellationToken);
@@ -94,6 +100,10 @@ public sealed class WatchController(AppDbContext context) : Controller
             }
         }
 
+        var manifest = lesson.Availability == Core.Catalog.CatalogAvailability.Available
+            ? await learning.BuildManifestAsync(lesson.Id, cancellationToken)
+            : null;
+
         var model = new WatchLessonModel(
             new LessonDetailModel(
                 lesson.Id.ToString(CultureInfo.InvariantCulture),
@@ -115,7 +125,8 @@ public sealed class WatchController(AppDbContext context) : Controller
                 folders.Concat(lessons)
                     .OrderBy(node => node.SortKey, StringComparer.Ordinal)
                     .ThenBy(node => node.Type, StringComparer.Ordinal)
-                    .ToList()));
+                    .ToList()),
+            manifest);
 
         return this.Jsx("Watch/Lesson", model, RenderMode.ServerAndClient);
     }

@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestones 0 and 1 executed on 2026-09-13 with explicit user authorization; milestones M2–M7 remain planned. Every M2+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0–3 executed on 2026-09-13 with explicit user authorization; milestones M4–M7 remain planned. Every M4+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -56,29 +56,43 @@ Post-review corrections (PR #2 review, [m1-library-review.md](../m1-library-revi
 
 Dependencies: M1.
 
-- [ ] Implement ready source rendition metadata and safe seekable file delivery with GET/HEAD/ranges.
-- [ ] Build player controls, aspect fit/fill, speed, skips, previous/next, and optional autoplay.
-- [ ] Implement LessonProgress behavior with automatic/manual completion and source generation.
-- [ ] Add playback session ownership, monotonic sequence acceptance, revisions, and lease heartbeat.
-- [ ] Save position periodically and on relevant player events; show unsaved state on write failure.
-- [ ] Implement Continue learning and completed-course replay behavior.
-- [ ] Preserve playback state when navigating, buffering, or rejecting autoplay.
-- [ ] Add race tests for delayed tab writes and completion overrides.
+Evidence (2026-09-13): all items below completed. The `PlaybackAndProgress` migration adds LessonProgress, PlaybackSessions, Renditions, and Preferences; the interface was rebuilt with Tailwind CSS 4 (committed generated stylesheet, no CDN).
+
+- [x] Implement ready source rendition metadata and safe seekable file delivery with GET/HEAD/ranges.
+- [x] Build player controls, aspect fit/fill, speed, skips, previous/next, and optional autoplay.
+- [x] Implement LessonProgress behavior with automatic/manual completion and source generation.
+- [x] Add playback session ownership, monotonic sequence acceptance, revisions, and lease heartbeat.
+- [x] Save position periodically and on relevant player events; show unsaved state on write failure.
+- [x] Implement Continue learning and completed-course replay behavior.
+- [x] Preserve playback state when navigating, buffering, or rejecting autoplay.
+- [x] Add race tests for delayed tab writes and completion overrides.
 
 Exit evidence: watch/pause/restart/resume flow, backward-seek persistence, manual incomplete preserved, multiple-tab stale-write rejection, bounded memory for media delivery, keyboard operation.
+
+Recorded results: browser-verified against the real library — playback, backward seek with position restore at 12.443 s after reload, ended/95% completion, manual incomplete surviving an ended signal, and the Continue learning shelf recommending next/replay. Integration tests cover stale-session rejection (409), duplicate sequence acknowledgement, close idempotency, If-Match completion conflicts (412), ready/stale rendition gating, and range delivery through `/media/renditions/{id}`; delivery streams via framework file results without full-file buffering.
+
+Post-review corrections (PR #3 review, [m2-review-comments.md](../m2-review-comments.md)): media delivery rejects a symbolic link in any ancestor of the requested path, not only the terminal file; completion and settings updates require an If-Match precondition and answer a missing or malformed one with 428 plus the current revision, and every mutating response carries an ETag; optimistic-concurrency losses are reloaded and re-evaluated so they resolve as documented duplicates, 412s or retryable 409s rather than 500s; the navigation flush is a keepalive fetch carrying the required header and is driven by `pagehide` rather than effect cleanup alone; active-scan observation on mount is restored; autoplay-next follows the live preference and carries an explicit play intent with a visible fallback when the browser refuses; all three completion choices stay reachable; a failed playback-session start is shown with a working retry; Continue learning is limited to each lesson's current source generation and recommends an available lesson when the remembered one is missing; Replay course starts at zero; and course pagination links carry the effective page size.
+
+Test totals after the corrections: 43 Core and 91 integration tests pass, one browser placeholder skipped. Linux deployment and broad codec/browser compatibility were not re-tested.
 
 ## M3: Subtitle discovery and selection
 
 Dependencies: M2.
 
-- [ ] Add SRT/VTT validation and safe bounded WebVTT normalization.
-- [ ] Implement matching precedence, language hints, separate Subtitle folders, and ambiguity handling.
-- [ ] Persist explicit associations and global enabled/Off preference.
-- [ ] Add subtitle candidate/menu controls and track lifecycle behavior.
-- [ ] Verify malformed text/encoding and missing-preferred-track messages.
-- [ ] Test subtitle persistence through lesson change, quality-source replacement, and restart.
+Evidence (2026-09-13): all items below completed. The `SubtitleAssociations` migration adds explicit manual associations and normalized-track columns (fingerprint, normalized path, version); normalization writes UTF-8 WebVTT under the application data directory keyed by content fingerprint.
+
+- [x] Add SRT/VTT validation and safe bounded WebVTT normalization.
+- [x] Implement matching precedence, language hints, separate Subtitle folders, and ambiguity handling.
+- [x] Persist explicit associations and global enabled/Off preference.
+- [x] Add subtitle candidate/menu controls and track lifecycle behavior.
+- [x] Verify malformed text/encoding and missing-preferred-track messages.
+- [x] Test subtitle persistence through lesson change, quality-source replacement, and restart.
 
 Exit evidence: adjacent SRT, existing VTT, separate-folder track, manual ambiguous selection, explicit Off, safe cue rendering, original subtitle bytes unchanged.
+
+Recorded results: 61 Core tests (bounded SRT/VTT conversion: CRLF/BOM tolerance, malformed rejection, cue/text limits, unsafe markup escaping, conservative language suffixes) and 110 integration tests (precedence tiers with ambiguity, manual selection persisting through rescans, Off surviving lesson changes, normalized delivery, malformed refusal, missing-preferred-track explanation). Browser-verified against the real library: the adjacent SRT auto-selected, 23 real cues parsed and rendered at their original timings, global Off overrode the selection across lessons, and a rescan left the source SRT bytes byte-identical (SHA-256 verified).
+
+Post-review corrections (PR #4 inline comments, [m3-review-responses.md](../m3-review-responses.md)): the `SubtitleAvailabilityAndNormalizationSource` migration records the source size and modification time each conversion used and marks tracks missing instead of deleting them, so edited sidecars stop serving stale captions and a manual preference survives its file disappearing; subtitle bytes are decoded strictly so undecodable files are reported rather than silently replaced with U+FFFD; switching between two existing tracks replaces the association inside one transaction; the resolved subtitle is kept separately from the global Off switch and returning to Automatic re-resolves a real track; and the player surfaces failures from lazy normalization instead of showing a checked Subtitles menu with no captions.
 
 ## M4: Permanent compatible playback copies
 

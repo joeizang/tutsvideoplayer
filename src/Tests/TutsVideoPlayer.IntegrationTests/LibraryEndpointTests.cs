@@ -40,10 +40,10 @@ public class LibraryEndpointTests(TestApplication application)
 
         var summary = await client.GetFromJsonAsync<LibrarySummaryModel>("/api/v1/library", TestContext.Current.CancellationToken);
         Assert.NotNull(summary);
-        Assert.Equal(3, summary.CourseCount);
-        Assert.Equal(7, summary.AvailableLessonCount);
+        Assert.Equal(4, summary.CourseCount);
+        Assert.Equal(8, summary.AvailableLessonCount);
         Assert.Equal(0, summary.MissingLessonCount);
-        Assert.Equal(3, summary.SubtitleTrackCount);
+        Assert.Equal(6, summary.SubtitleTrackCount);
         Assert.True(summary.CatalogRevision > 0);
         Assert.NotNull(summary.LatestScan);
         Assert.Equal("Succeeded", summary.LatestScan.State);
@@ -105,7 +105,9 @@ public class LibraryEndpointTests(TestApplication application)
     public async Task LessonDetailsIncludeNeighboursAndProbe()
     {
         var client = application.CreateClient();
-        var tree = await client.GetFromJsonAsync<CourseTreeModel>("/api/v1/courses/1/tree", TestContext.Current.CancellationToken);
+        var courses = await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses?pageSize=100", TestContext.Current.CancellationToken);
+        var alpha = courses!.Courses.Single(course => course.Title == "CourseAlpha");
+        var tree = await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{alpha.Id}/tree", TestContext.Current.CancellationToken);
         var firstLesson = tree!.Nodes.First(node => node.Type == "lesson");
 
         var lesson = await client.GetFromJsonAsync<LessonDetailModel>($"/api/v1/lessons/{firstLesson.Id}", TestContext.Current.CancellationToken);
@@ -115,7 +117,7 @@ public class LibraryEndpointTests(TestApplication application)
         Assert.Null(lesson.PreviousLessonId);
         Assert.NotNull(lesson.NextLessonId);
         Assert.Null(lesson.DurationMs);
-        Assert.Equal(0, lesson.SubtitleCandidateCount);
+        Assert.Equal(2, lesson.SubtitleCandidateCount);
     }
 
     [Fact]
