@@ -232,7 +232,9 @@ public class SubtitleSelectionTests(TestApplication application)
         var manifest = await client.GetFromJsonAsync<PlaybackManifestModel>(
             $"/api/v1/lessons/{video.Id}/playback", TestContext.Current.CancellationToken);
         Assert.False(manifest!.Selection.SubtitlesEnabled);
-        Assert.Null(manifest.Selection.SelectedSubtitleId);
+        // The resolved track is preserved while it is hidden. Blanking it here is what left
+        // the video captionless after navigating and turning subtitles back on.
+        Assert.Equal(candidates.Candidates[0].Id, manifest.Selection.SelectedSubtitleId);
 
         // The global preference follows the learner to another lesson in the same course.
         var other = tree.Nodes.Where(node => node.Type == "lesson").Last();

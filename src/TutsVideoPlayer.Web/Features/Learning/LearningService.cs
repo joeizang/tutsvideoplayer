@@ -79,9 +79,10 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
 
         var preferences = await EnsurePreferencesAsync(cancellationToken);
         var subtitleCandidates = await subtitles.GetCandidatesAsync(lessonId, cancellationToken);
-        var selectedSubtitleId = subtitleCandidates.SubtitlesEnabled
-            ? subtitleCandidates.ManualId ?? subtitleCandidates.AutoSelectedId
-            : null;
+        // The resolved track and its visibility are separate facts. Blanking the selection
+        // while subtitles are globally off meant that turning them back on left the video
+        // captionless despite a saved preference or an exact automatic match.
+        var selectedSubtitleId = subtitleCandidates.ResolvedId;
 
         var renditionModels = renditions
             .Select(rendition => new RenditionModel(
@@ -125,7 +126,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                 candidate.Language,
                 candidate.State,
                 candidate.Reason,
-                candidate.TrackUrl)).ToList(),
+                candidate.TrackUrl,
+                candidate.Message)).ToList(),
             new SubtitleSelectionStateModel(selectedSubtitleId, subtitleCandidates.SubtitlesEnabled),
             readyDefault is null ? null : readyDefault.Id.ToString(CultureInfo.InvariantCulture),
             new PlaybackPreferencesModel(preferences.PlaybackSpeed, preferences.Autoplay, preferences.FitMode, preferences.Revision));

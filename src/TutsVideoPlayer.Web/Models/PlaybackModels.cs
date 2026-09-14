@@ -32,7 +32,8 @@ public sealed record ManifestSubtitleModel(
     [property: JsonPropertyName("language")] string? Language,
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("reason")] string Reason,
-    [property: JsonPropertyName("trackUrl")] string? TrackUrl);
+    [property: JsonPropertyName("trackUrl")] string? TrackUrl,
+    [property: JsonPropertyName("message")] string? Message);
 
 public sealed record SubtitleSelectionStateModel(
     [property: JsonPropertyName("selectedSubtitleId")] string? SelectedSubtitleId,

@@ -122,6 +122,8 @@ internal sealed class SubtitleTrackConfiguration : IEntityTypeConfiguration<Subt
         builder.Property(track => track.RelativePath).IsRequired();
         builder.Property(track => track.Format).IsRequired();
         builder.Property(track => track.ParseStatus).IsRequired();
+        builder.Property(track => track.Availability).HasConversion<int>();
+        builder.HasIndex(track => new { track.CourseId, track.Availability });
         builder.HasOne(track => track.Course)
             .WithMany()
             .HasForeignKey(track => track.CourseId)
@@ -141,10 +143,12 @@ internal sealed class SubtitleAssociationConfiguration : IEntityTypeConfiguratio
             .WithMany()
             .HasForeignKey(association => association.LessonId)
             .OnDelete(DeleteBehavior.Cascade);
+        // Restrict, not Cascade: a subtitle row is never deleted while a manual association
+        // points at it, so a vanished sidecar cannot quietly erase the learner's preference.
         builder.HasOne(association => association.Track)
             .WithMany()
             .HasForeignKey(association => association.SubtitleTrackId)
-            .OnDelete(DeleteBehavior.Cascade);
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }
 

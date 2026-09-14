@@ -64,6 +64,10 @@ export function VideoPlayer({
     const [subtitlesEnabled, setSubtitlesEnabled] = useState(manifest.selection.subtitlesEnabled);
     const [selectedSubtitleId, setSelectedSubtitleId] = useState(manifest.selection.selectedSubtitleId);
     const [subtitlesMenuOpen, setSubtitlesMenuOpen] = useState(false);
+    // Candidates are refreshed in place: normalization happens lazily when the browser first
+    // requests a track, so states and messages change after this page was rendered.
+    const [subtitleCandidates, setSubtitleCandidates] = useState(manifest.subtitles);
+    const [subtitleMessage, setSubtitleMessage] = useState<string | null>(null);
     const [speed, setSpeed] = useState(manifest.preferences.speed);
     const [fit, setFit] = useState<"Contain" | "Fill">(manifest.preferences.fitMode === "Fill" ? "Fill" : "Contain");
     const [muted, setMuted] = useState(false);
@@ -457,10 +461,36 @@ export function VideoPlayer({
         }
     };
 
-    const selectedSubtitle = manifest.subtitles.find(
-        (candidate) => candidate.id === selectedSubtitleId
-            && candidate.trackUrl
-            && (candidate.state === "Discovered" || candidate.state === "Normalized"));
+    type SubtitleCandidate = (typeof manifest.subtitles)[number];
+
+    /**
+     * Re-reads the candidate list and returns it. The server owns automatic resolution, so
+     * this is also how the player learns which track "Automatic" actually resolved to.
+     */
+    const refreshSubtitles = async (): Promise<{
+        candidates: SubtitleCandidate[];
+        resolvedId: string | null;
+        message: string | null;
+    } | null> => {
+        try {
+            const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/subtitle-candidates`);
+            if (!response.ok) {
+                return null;
+            }
+
+            const latest = await response.json();
+            const candidates = (latest.candidates ?? []) as SubtitleCandidate[];
+            setSubtitleCandidates(candidates);
+            setSubtitlesEnabled(latest.subtitlesEnabled);
+            return {
+                candidates,
+                resolvedId: latest.resolvedId ?? null,
+                message: latest.ambiguityMessage ?? null
+            };
+        } catch {
+            return null;
+        }
+    };
 
     const toggleSubtitlesEnabled = async () => {
         try {
@@ -504,11 +534,38 @@ export function VideoPlayer({
             }
 
             const updated = await response.json();
-            setSelectedSubtitleId(updated.automatic ? null : updated.subtitleTrackId);
+            setSubtitleMessage(null);
+
+            if (!updated.automatic) {
+                setSelectedSubtitleId(updated.subtitleTrackId);
+                setSubtitlesMenuOpen(false);
+                return;
+            }
+
+            // The automatic response carries no track id by design. Asking the server what
+            // automatic resolves to keeps an unambiguous adjacent sidecar playing instead of
+            // dropping the rendered text track.
+            const latest = await refreshSubtitles();
+            setSelectedSubtitleId(latest?.resolvedId ?? null);
+            setSubtitleMessage(latest?.message ?? null);
             setSubtitlesMenuOpen(false);
         } catch {
             return;
         }
+    };
+
+    /**
+     * A track element only reports that the browser could not load the cue file. Normalization
+     * is lazy, so this is where a malformed sidecar first becomes visible: the candidate list
+     * is re-read for the recorded reason and the selection is kept so another file can be
+     * chosen from the same menu.
+     */
+    const onTrackError = async (trackId: string) => {
+        const latest = await refreshSubtitles();
+        const failed = latest?.candidates.find((candidate) => candidate.id === trackId);
+        setSubtitleMessage(
+            failed?.message
+            ?? "This subtitle file could not be prepared. Choose another from the Subtitles menu.");
     };
 
     const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -586,7 +643,7 @@ export function VideoPlayer({
                     onTimeUpdate={(event) => setCurrentTimeMs(Math.round(event.currentTarget.currentTime * 1000))}
                 >
                     {subtitlesEnabled && selectedSubtitleId ? (
-                        manifest.subtitles
+                        subtitleCandidates
                             .filter((candidate) => candidate.id === selectedSubtitleId && candidate.trackUrl)
                             .map((candidate) => (
                                 <track
@@ -595,6 +652,7 @@ export function VideoPlayer({
                                     label={candidate.label}
                                     srcLang={candidate.language ?? undefined}
                                     src={candidate.trackUrl ?? undefined}
+                                    onError={() => void onTrackError(candidate.id)}
                                     default
                                 />
                             ))
@@ -691,7 +749,7 @@ export function VideoPlayer({
                             >
                                 {subtitlesEnabled ? "Turn subtitles off (global)" : "Turn subtitles on (global)"}
                             </button>
-                            {manifest.subtitles.length === 0 ? (
+                            {subtitleCandidates.length === 0 ? (
                                 <p className="px-2 py-1 text-ink-soft">No subtitles found for this lesson.</p>
                             ) : (
                                 <ul className="m-0 max-h-64 list-none overflow-y-auto p-0">
@@ -704,19 +762,25 @@ export function VideoPlayer({
                                             Automatic selection
                                         </button>
                                     </li>
-                                    {manifest.subtitles.map((candidate) => (
+                                    {subtitleCandidates.map((candidate) => (
                                         <li key={candidate.id}>
                                             <button
                                                 type="button"
-                                                disabled={candidate.state === "Failed"}
+                                                disabled={candidate.state === "Failed" || candidate.state === "Missing"}
                                                 onClick={() => void selectSubtitle(candidate.id)}
-                                                className="w-full rounded px-2 py-1 text-left hover:bg-canvas disabled:opacity-50 dark:hover:bg-neutral-700"
+                                                className={candidate.id === selectedSubtitleId
+                                                    ? "w-full rounded bg-action/10 px-2 py-1 text-left text-action disabled:opacity-50"
+                                                    : "w-full rounded px-2 py-1 text-left hover:bg-canvas disabled:opacity-50 dark:hover:bg-neutral-700"}
                                             >
                                                 <span className="font-medium">{candidate.label}</span>
                                                 <span className="ml-1 text-xs text-ink-soft">
                                                     {candidate.reason}
                                                     {candidate.state === "Failed" ? " · could not be converted" : ""}
+                                                    {candidate.state === "Missing" ? " · no longer in the library" : ""}
                                                 </span>
+                                                {candidate.message ? (
+                                                    <span className="block text-xs text-ink-soft">{candidate.message}</span>
+                                                ) : null}
                                             </button>
                                         </li>
                                     ))}
@@ -819,7 +883,9 @@ export function VideoPlayer({
                 {stale === "none" && staleMessage === null && savedPositionMs > 0 && !playing ? (
                     <span className="text-ink-soft">Resumed at {formatDuration(savedPositionMs)}</span>
                 ) : null}
-                {subtitlesEnabled && !selectedSubtitleId && manifest.subtitles.length > 0 ? (
+                {subtitleMessage ? (
+                    <span role="alert" className="text-danger">{subtitleMessage}</span>
+                ) : subtitlesEnabled && !selectedSubtitleId && subtitleCandidates.length > 0 ? (
                     <span className="text-ink-soft">No subtitle selected. Open the Subtitles menu to choose one.</span>
                 ) : null}
             </div>

@@ -87,6 +87,20 @@ public sealed class SubtitleTrackEntity
     public string? NormalizedRelativePath { get; set; }
     public string? NormalizationVersion { get; set; }
 
+    /// <summary>
+    /// A track whose sidecar has disappeared is kept and marked missing rather than deleted,
+    /// so a manual subtitle preference is not silently forgotten with the catalog row.
+    /// </summary>
+    public CatalogAvailability Availability { get; set; }
+
+    /// <summary>
+    /// Size and modification time of the source file at the moment it was normalized. They are
+    /// compared before a cached artifact is served, so an edited sidecar stops serving the old
+    /// captions even when nothing else about the row changed.
+    /// </summary>
+    public long? NormalizedSourceLengthBytes { get; set; }
+    public long? NormalizedSourceModifiedUtcMs { get; set; }
+
     public CourseEntity Course { get; set; } = null!;
 }
 

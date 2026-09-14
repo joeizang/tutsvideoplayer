@@ -703,7 +703,23 @@ public sealed class LibraryScanner(
             track.Format = Path.GetExtension(subtitle.RelativePath).ToLowerInvariant() == ".vtt" ? "Vtt" : "Srt";
             track.LengthBytes = subtitle.LengthBytes;
             track.ModifiedUtcMs = subtitle.ModifiedUtcMs;
-            track.ParseStatus = "Discovered";
+            track.Availability = CatalogAvailability.Available;
+
+            // The parse state belongs to a specific set of bytes. It is preserved while the
+            // file still matches what was converted, and reset only when the size or
+            // modification time show a different file, so a rescan neither discards a good
+            // conversion nor lets an edited sidecar keep claiming it is converted.
+            var matchesConverted = track.NormalizedSourceLengthBytes == subtitle.LengthBytes
+                && track.NormalizedSourceModifiedUtcMs == subtitle.ModifiedUtcMs;
+            if (!matchesConverted)
+            {
+                track.ParseStatus = "Discovered";
+                track.ParseError = null;
+                track.NormalizedRelativePath = null;
+                track.Fingerprint = null;
+                track.NormalizedSourceLengthBytes = null;
+                track.NormalizedSourceModifiedUtcMs = null;
+            }
             SubtitleConverter.TrySplitLanguageSuffix(
                 Path.GetFileNameWithoutExtension(subtitle.RelativePath), out _, out var parsedLanguage);
             track.Language = parsedLanguage;
@@ -721,7 +737,13 @@ public sealed class LibraryScanner(
                 continue;
             }
 
-            context.SubtitleTracks.Remove(track);
+            // Deleting the row used to cascade away the learner's manual subtitle preference,
+            // which SUB-03 requires to be explained rather than forgotten. The track is kept
+            // and marked missing so the association survives and the reason can be shown.
+            track.Availability = CatalogAvailability.Missing;
+            track.NormalizedRelativePath = null;
+            track.NormalizedSourceLengthBytes = null;
+            track.NormalizedSourceModifiedUtcMs = null;
         }
 
         await context.SaveChangesAsync(cancellationToken);
