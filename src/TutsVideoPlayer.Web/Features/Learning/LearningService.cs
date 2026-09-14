@@ -6,10 +6,11 @@ using TutsVideoPlayer.Core.Learning;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
 using TutsVideoPlayer.Web.Models;
+using TutsVideoPlayer.Web.Features.Subtitles;
 
 namespace TutsVideoPlayer.Web.Features.Learning;
 
-public sealed class LearningService(AppDbContext context)
+public sealed class LearningService(AppDbContext context, Subtitles.SubtitleService subtitles)
 {
     public const int HeartbeatIntervalMs = 10_000;
     private const double CompletionThreshold = 0.95;
@@ -77,6 +78,10 @@ public sealed class LearningService(AppDbContext context)
             .ToListAsync(cancellationToken);
 
         var preferences = await EnsurePreferencesAsync(cancellationToken);
+        var subtitleCandidates = await subtitles.GetCandidatesAsync(lessonId, cancellationToken);
+        var selectedSubtitleId = subtitleCandidates.SubtitlesEnabled
+            ? subtitleCandidates.ManualId ?? subtitleCandidates.AutoSelectedId
+            : null;
 
         var renditionModels = renditions
             .Select(rendition => new RenditionModel(
@@ -102,6 +107,7 @@ public sealed class LearningService(AppDbContext context)
             ? false
             : CompletionResolver.IsEffectivelyComplete(progress.AutomaticCompleted, progress.ManualCompletion);
 
+
         return new PlaybackManifestModel(
             lesson.Id.ToString(CultureInfo.InvariantCulture),
             lesson.SourceGeneration,
@@ -113,6 +119,14 @@ public sealed class LearningService(AppDbContext context)
                 progress?.ManualCompletion?.ToString(),
                 progress?.Revision ?? 0),
             renditionModels,
+            subtitleCandidates.Candidates.Select(candidate => new ManifestSubtitleModel(
+                candidate.Id,
+                candidate.Label,
+                candidate.Language,
+                candidate.State,
+                candidate.Reason,
+                candidate.TrackUrl)).ToList(),
+            new SubtitleSelectionStateModel(selectedSubtitleId, subtitleCandidates.SubtitlesEnabled),
             readyDefault is null ? null : readyDefault.Id.ToString(CultureInfo.InvariantCulture),
             new PlaybackPreferencesModel(preferences.PlaybackSpeed, preferences.Autoplay, preferences.FitMode, preferences.Revision));
     }

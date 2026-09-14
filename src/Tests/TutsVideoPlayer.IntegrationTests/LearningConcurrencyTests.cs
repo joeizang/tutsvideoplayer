@@ -67,7 +67,8 @@ public sealed class LearningConcurrencyTests : IAsyncLifetime
         await _context.SaveChangesAsync();
         _lessonId = lesson.Id;
 
-        _learning = new LearningService(_context);
+        _learning = new LearningService(_context, new TutsVideoPlayer.Web.Features.Subtitles.SubtitleService(
+            _context, Microsoft.Extensions.Options.Options.Create(new TutsVideoPlayer.Web.Features.Library.AppOptions()), Microsoft.Extensions.Logging.Abstractions.NullLogger<TutsVideoPlayer.Web.Features.Subtitles.SubtitleService>.Instance));
     }
 
     public async ValueTask DisposeAsync()

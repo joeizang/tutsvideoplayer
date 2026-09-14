@@ -5,6 +5,7 @@ using TutsVideoPlayer.Infrastructure.Media;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Library;
 using TutsVideoPlayer.Web.Features.Learning;
+using TutsVideoPlayer.Web.Features.Subtitles;
 namespace TutsVideoPlayer.Web.Hosting;
 
 public static class CatalogRegistration
@@ -26,6 +27,7 @@ public static class CatalogRegistration
         services.AddScoped<DatabaseInitializer>();
         services.AddScoped<LibraryScanner>();
         services.AddScoped<LearningService>();
+        services.AddScoped<SubtitleService>();
         services.AddSingleton<ScanCoordinator>();
         services.AddHostedService<StartupScanService>();
         services.AddHostedService<StartupMigrationCheck>();

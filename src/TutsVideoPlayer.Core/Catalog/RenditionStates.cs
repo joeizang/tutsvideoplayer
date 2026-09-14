@@ -23,3 +23,9 @@ public enum RenditionStatus
     Evicting = 4,
     Evicted = 5
 }
+
+public enum SubtitleAssociationOrigin
+{
+    Manual = 0,
+    Automatic = 1
+}

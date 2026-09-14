@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.EntityFrameworkCore.Storage;
 using TutsVideoPlayer.Core.Catalog;
+using TutsVideoPlayer.Core.Subtitles;
 using TutsVideoPlayer.Infrastructure.FileSystem;
 using TutsVideoPlayer.Infrastructure.Media;
 using TutsVideoPlayer.Infrastructure.Persistence;
@@ -703,6 +704,9 @@ public sealed class LibraryScanner(
             track.LengthBytes = subtitle.LengthBytes;
             track.ModifiedUtcMs = subtitle.ModifiedUtcMs;
             track.ParseStatus = "Discovered";
+            SubtitleConverter.TrySplitLanguageSuffix(
+                Path.GetFileNameWithoutExtension(subtitle.RelativePath), out _, out var parsedLanguage);
+            track.Language = parsedLanguage;
         }
 
         foreach (var track in existing.SubtitlesByPath.Values)

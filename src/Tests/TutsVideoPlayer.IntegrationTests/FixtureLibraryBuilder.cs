@@ -42,6 +42,12 @@ public static class FixtureLibraryBuilder
         WriteFile(Path.Combine(subsCourse, "video.srt"), Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nhi\n"));
         WriteFile(Path.Combine(subsCourse, "video.vtt"), Encoding.UTF8.GetBytes("WEBVTT\n\n00:00.000 --> 00:01.000\nhi\n"));
         WriteFile(Path.Combine(subsCourse, "unrelated.srt"), Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nhi\n"));
+        WriteFile(Path.Combine(subsCourse, "broken.srt"), Encoding.UTF8.GetBytes("1\nnot a timing line\ntext\n"));
+
+        WriteFile(Path.Combine(alpha, "01 Intro", "Subtitles", "02 Getting Started.srt"),
+            Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nfolder cue\n"));
+        WriteFile(Path.Combine(alpha, "03 Setup", "10 Advanced.en.srt"),
+            Encoding.UTF8.GetBytes("1\n00:00:00,000 --> 00:00:01,000\nenglish cue\n"));
 
         var empty = Path.Combine(rootDirectory, "EmptyDirectory");
         Directory.CreateDirectory(empty);

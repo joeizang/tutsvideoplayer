@@ -26,6 +26,18 @@ public sealed record PlaybackPreferencesModel(
     // Carried so the player can send an If-Match precondition with its first settings write.
     [property: JsonPropertyName("revision")] int Revision);
 
+public sealed record ManifestSubtitleModel(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("label")] string Label,
+    [property: JsonPropertyName("language")] string? Language,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonPropertyName("trackUrl")] string? TrackUrl);
+
+public sealed record SubtitleSelectionStateModel(
+    [property: JsonPropertyName("selectedSubtitleId")] string? SelectedSubtitleId,
+    [property: JsonPropertyName("subtitlesEnabled")] bool SubtitlesEnabled);
+
 public sealed record PlaybackManifestModel(
     [property: JsonPropertyName("lessonId")] string LessonId,
     [property: JsonPropertyName("sourceGeneration")] int SourceGeneration,
@@ -33,6 +45,8 @@ public sealed record PlaybackManifestModel(
     [property: JsonPropertyName("revision")] int Revision,
     [property: JsonPropertyName("progress")] ProgressStateModel Progress,
     [property: JsonPropertyName("renditions")] IReadOnlyList<RenditionModel> Renditions,
+    [property: JsonPropertyName("subtitles")] IReadOnlyList<ManifestSubtitleModel> Subtitles,
+    [property: JsonPropertyName("selection")] SubtitleSelectionStateModel Selection,
     [property: JsonPropertyName("readyDefaultRenditionId")] string? ReadyDefaultRenditionId,
     [property: JsonPropertyName("preferences")] PlaybackPreferencesModel Preferences);
 

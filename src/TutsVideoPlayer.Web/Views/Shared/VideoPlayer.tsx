@@ -61,6 +61,9 @@ export function VideoPlayer({
     const [completionRevision, setCompletionRevision] = useState(manifest.progress.revision);
     const [completionMessage, setCompletionMessage] = useState<string | null>(null);
     const [settingsRevision, setSettingsRevision] = useState(manifest.preferences.revision);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(manifest.selection.subtitlesEnabled);
+    const [selectedSubtitleId, setSelectedSubtitleId] = useState(manifest.selection.selectedSubtitleId);
+    const [subtitlesMenuOpen, setSubtitlesMenuOpen] = useState(false);
     const [speed, setSpeed] = useState(manifest.preferences.speed);
     const [fit, setFit] = useState<"Contain" | "Fill">(manifest.preferences.fitMode === "Fill" ? "Fill" : "Contain");
     const [muted, setMuted] = useState(false);
@@ -454,6 +457,60 @@ export function VideoPlayer({
         }
     };
 
+    const selectedSubtitle = manifest.subtitles.find(
+        (candidate) => candidate.id === selectedSubtitleId
+            && candidate.trackUrl
+            && (candidate.state === "Discovered" || candidate.state === "Normalized"));
+
+    const toggleSubtitlesEnabled = async () => {
+        try {
+            const current = await fetch("/api/v1/settings");
+            if (!current.ok) {
+                return;
+            }
+
+            const currentSettings = await current.json();
+            const response = await fetch("/api/v1/settings", {
+                method: "PUT",
+                headers: { ...REQUEST_HEADERS, "Content-Type": "application/json", "If-Match": `\"${currentSettings.revision}\"` },
+                body: JSON.stringify({ subtitleEnabled: !subtitlesEnabled })
+            });
+            if (response.status === 412 || response.status === 428) {
+                window.location.reload();
+                return;
+            }
+
+            if (!response.ok) {
+                return;
+            }
+
+            const updated = await response.json();
+            setSubtitlesEnabled(updated.subtitleEnabled);
+            setSettingsRevision(updated.revision);
+        } catch {
+            return;
+        }
+    };
+
+    const selectSubtitle = async (trackId: string | null) => {
+        try {
+            const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/subtitle-selection`, {
+                method: "PUT",
+                headers: { ...REQUEST_HEADERS, "Content-Type": "application/json" },
+                body: JSON.stringify({ subtitleTrackId: trackId })
+            });
+            if (!response.ok) {
+                return;
+            }
+
+            const updated = await response.json();
+            setSelectedSubtitleId(updated.automatic ? null : updated.subtitleTrackId);
+            setSubtitlesMenuOpen(false);
+        } catch {
+            return;
+        }
+    };
+
     const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
         const target = event.target as HTMLElement;
         if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA") {
@@ -480,6 +537,10 @@ export function VideoPlayer({
                 } else {
                     void containerRef.current?.requestFullscreen();
                 }
+                break;
+            case "c":
+                event.preventDefault();
+                void toggleSubtitlesEnabled();
                 break;
             case "m": {
                 const video = videoRef.current;
@@ -523,7 +584,22 @@ export function VideoPlayer({
                     onPlaying={() => setBuffering(false)}
                     onSeeked={() => void writeProgress({ isPlaying: playing })}
                     onTimeUpdate={(event) => setCurrentTimeMs(Math.round(event.currentTarget.currentTime * 1000))}
-                />
+                >
+                    {subtitlesEnabled && selectedSubtitleId ? (
+                        manifest.subtitles
+                            .filter((candidate) => candidate.id === selectedSubtitleId && candidate.trackUrl)
+                            .map((candidate) => (
+                                <track
+                                    key={candidate.id}
+                                    kind="subtitles"
+                                    label={candidate.label}
+                                    srcLang={candidate.language ?? undefined}
+                                    src={candidate.trackUrl ?? undefined}
+                                    default
+                                />
+                            ))
+                    ) : null}
+                </video>
                 {buffering ? (
                     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                         <span className="animate-pulse text-sm text-neutral-300">Buffering…</span>
@@ -595,6 +671,60 @@ export function VideoPlayer({
                 >
                     {muted ? "Unmute" : "Mute"}
                 </button>
+                <div className="relative">
+                    <button
+                        type="button"
+                        onClick={() => setSubtitlesMenuOpen((open) => !open)}
+                        className={subtitlesEnabled && selectedSubtitleId
+                            ? "rounded-md border border-action/40 bg-action/10 px-2.5 py-1.5 text-sm text-action"
+                            : "rounded-md border border-ink/15 bg-surface px-2.5 py-1.5 text-sm text-ink hover:bg-canvas"}
+                        title="Subtitles (C)"
+                    >
+                        {subtitlesEnabled ? (selectedSubtitleId ? "Subtitles ✓" : "Subtitles") : "Subtitles off"}
+                    </button>
+                    {subtitlesMenuOpen ? (
+                        <div className="absolute bottom-full z-10 mb-1 w-72 rounded-lg border border-ink/10 bg-surface p-2 text-sm shadow-lg dark:border-neutral-600 dark:bg-neutral-800">
+                            <button
+                                type="button"
+                                onClick={() => void toggleSubtitlesEnabled()}
+                                className="mb-1 w-full rounded px-2 py-1 text-left hover:bg-canvas dark:hover:bg-neutral-700"
+                            >
+                                {subtitlesEnabled ? "Turn subtitles off (global)" : "Turn subtitles on (global)"}
+                            </button>
+                            {manifest.subtitles.length === 0 ? (
+                                <p className="px-2 py-1 text-ink-soft">No subtitles found for this lesson.</p>
+                            ) : (
+                                <ul className="m-0 max-h-64 list-none overflow-y-auto p-0">
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={() => void selectSubtitle(null)}
+                                            className="w-full rounded px-2 py-1 text-left hover:bg-canvas dark:hover:bg-neutral-700"
+                                        >
+                                            Automatic selection
+                                        </button>
+                                    </li>
+                                    {manifest.subtitles.map((candidate) => (
+                                        <li key={candidate.id}>
+                                            <button
+                                                type="button"
+                                                disabled={candidate.state === "Failed"}
+                                                onClick={() => void selectSubtitle(candidate.id)}
+                                                className="w-full rounded px-2 py-1 text-left hover:bg-canvas disabled:opacity-50 dark:hover:bg-neutral-700"
+                                            >
+                                                <span className="font-medium">{candidate.label}</span>
+                                                <span className="ml-1 text-xs text-ink-soft">
+                                                    {candidate.reason}
+                                                    {candidate.state === "Failed" ? " · could not be converted" : ""}
+                                                </span>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    ) : null}
+                </div>
                 <button
                     type="button"
                     onClick={() => {
@@ -688,6 +818,9 @@ export function VideoPlayer({
                 ) : null}
                 {stale === "none" && staleMessage === null && savedPositionMs > 0 && !playing ? (
                     <span className="text-ink-soft">Resumed at {formatDuration(savedPositionMs)}</span>
+                ) : null}
+                {subtitlesEnabled && !selectedSubtitleId && manifest.subtitles.length > 0 ? (
+                    <span className="text-ink-soft">No subtitle selected. Open the Subtitles menu to choose one.</span>
                 ) : null}
             </div>
         </div>

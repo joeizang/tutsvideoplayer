@@ -82,8 +82,24 @@ public sealed class SubtitleTrackEntity
     public long LengthBytes { get; set; }
     public long ModifiedUtcMs { get; set; }
     public string ParseStatus { get; set; } = "Discovered";
+    public string? ParseError { get; set; }
+    public string? Fingerprint { get; set; }
+    public string? NormalizedRelativePath { get; set; }
+    public string? NormalizationVersion { get; set; }
 
     public CourseEntity Course { get; set; } = null!;
+}
+
+public sealed class SubtitleAssociationEntity
+{
+    public long LessonId { get; set; }
+    public long SubtitleTrackId { get; set; }
+    public SubtitleAssociationOrigin Origin { get; set; }
+    public int Priority { get; set; }
+    public int? SourceGeneration { get; set; }
+
+    public LessonEntity Lesson { get; set; } = null!;
+    public SubtitleTrackEntity Track { get; set; } = null!;
 }
 
 public sealed class ScanRunEntity

@@ -12,6 +12,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<LessonEntity> Lessons => Set<LessonEntity>();
     public DbSet<SourceComponentEntity> SourceComponents => Set<SourceComponentEntity>();
     public DbSet<SubtitleTrackEntity> SubtitleTracks => Set<SubtitleTrackEntity>();
+    public DbSet<SubtitleAssociationEntity> SubtitleAssociations => Set<SubtitleAssociationEntity>();
     public DbSet<ScanRunEntity> ScanRuns => Set<ScanRunEntity>();
     public DbSet<ScanIssueEntity> ScanIssues => Set<ScanIssueEntity>();
     public DbSet<LessonProgressEntity> LessonProgress => Set<LessonProgressEntity>();

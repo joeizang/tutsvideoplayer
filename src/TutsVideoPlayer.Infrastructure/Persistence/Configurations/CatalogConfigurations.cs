@@ -130,6 +130,24 @@ internal sealed class SubtitleTrackConfiguration : IEntityTypeConfiguration<Subt
     }
 }
 
+internal sealed class SubtitleAssociationConfiguration : IEntityTypeConfiguration<SubtitleAssociationEntity>
+{
+    public void Configure(EntityTypeBuilder<SubtitleAssociationEntity> builder)
+    {
+        builder.ToTable("SubtitleAssociations");
+        builder.HasKey(association => new { association.LessonId, association.SubtitleTrackId });
+        builder.Property(association => association.Origin);
+        builder.HasOne(association => association.Lesson)
+            .WithMany()
+            .HasForeignKey(association => association.LessonId)
+            .OnDelete(DeleteBehavior.Cascade);
+        builder.HasOne(association => association.Track)
+            .WithMany()
+            .HasForeignKey(association => association.SubtitleTrackId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
 internal sealed class ScanRunConfiguration : IEntityTypeConfiguration<ScanRunEntity>
 {
     public void Configure(EntityTypeBuilder<ScanRunEntity> builder)
