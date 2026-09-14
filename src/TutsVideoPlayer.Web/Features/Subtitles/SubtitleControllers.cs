@@ -61,9 +61,12 @@ public sealed class SubtitleSelectionController(SubtitleService subtitles) : Con
                 title: "Subtitle outside the course",
                 detail: exception.Message);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exception)
         {
-            return NotFound();
+            return Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "Subtitle selection unavailable",
+                detail: exception.Message);
         }
     }
 }

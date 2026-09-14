@@ -39,15 +39,7 @@ public class SubtitleSelectionTests(TestApplication application)
     private async Task<CourseTreeModel> GetTreeAsync(HttpClient client, string courseTitle)
     {
         var courses = await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses?pageSize=100", TestContext.Current.CancellationToken);
-        if (courses!.Courses.All(candidate => candidate.Title != courseTitle))
-        {
-            var scan = await client.GetFromJsonAsync<ScanStatusModel>("/api/v1/library", TestContext.Current.CancellationToken);
-            throw new Xunit.Sdk.XunitException(
-                $"Course '{courseTitle}' not found. Visible: [{string.Join(", ", courses.Courses.Select(candidate => candidate.Title))}], total: {courses.TotalCount}. "
-                + $"Library scan: {System.Text.Json.JsonSerializer.Serialize(scan)}.");
-        }
-
-        var course = courses.Courses.Single(candidate => candidate.Title == courseTitle);
+        var course = courses!.Courses.Single(candidate => candidate.Title == courseTitle);
         return (await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{course.Id}/tree", TestContext.Current.CancellationToken))!;
     }
 
@@ -270,13 +262,23 @@ public class SubtitleSelectionTests(TestApplication application)
             new SubtitleSelectionController.SelectionRequest(vtt.Id), TestContext.Current.CancellationToken);
 
         // Delete the underlying file without rescanning: the association still points at a
-        // track whose source can no longer be resolved.
-        File.Delete(Path.Combine(application.FixtureRoot, "CourseSubs", "video.vtt"));
+        // track whose source can no longer be resolved. The shared fixture file is restored
+        // so later tests still see the complete library.
+        var vttPath = Path.Combine(application.FixtureRoot, "CourseSubs", "video.vtt");
+        var vttContent = await File.ReadAllBytesAsync(vttPath, TestContext.Current.CancellationToken);
+        File.Delete(vttPath);
 
-        var refused = await client.GetAsync($"/media/subtitles/{vtt.Id}.vtt", TestContext.Current.CancellationToken);
-        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
-        var problem = await refused.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
-        Assert.Contains("not available inside the library root", problem);
+        try
+        {
+            var refused = await client.GetAsync($"/media/subtitles/{vtt.Id}.vtt", TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+            var problem = await refused.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
+            Assert.Contains("not available inside the library root", problem);
+        }
+        finally
+        {
+            await File.WriteAllBytesAsync(vttPath, vttContent, TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]

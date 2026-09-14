@@ -169,22 +169,27 @@ public sealed class SubtitleService(AppDbContext context, IOptions<AppOptions> o
             throw new InvalidOperationException("The selected subtitle track belongs to a different course.");
         }
 
-        if (existing is null)
+        if (existing is not null && existing.SubtitleTrackId == trackId.Value)
         {
-            context.SubtitleAssociations.Add(new SubtitleAssociationEntity
-            {
-                LessonId = lessonId,
-                SubtitleTrackId = trackId.Value,
-                Origin = SubtitleAssociationOrigin.Manual,
-                Priority = 0,
-                SourceGeneration = null
-            });
-        }
-        else
-        {
-            existing.SubtitleTrackId = trackId.Value;
+            return new SubtitleSelectionModel(trackId.Value.ToString(CultureInfo.InvariantCulture), Automatic: false);
         }
 
+        if (existing is not null)
+        {
+            // SubtitleTrackId is part of the identifying key, so replacing the manual
+            // choice is a delete followed by an insert rather than a key mutation.
+            context.SubtitleAssociations.Remove(existing);
+            await context.SaveChangesAsync(cancellationToken);
+        }
+
+        context.SubtitleAssociations.Add(new SubtitleAssociationEntity
+        {
+            LessonId = lessonId,
+            SubtitleTrackId = trackId.Value,
+            Origin = SubtitleAssociationOrigin.Manual,
+            Priority = 0,
+            SourceGeneration = null
+        });
         await context.SaveChangesAsync(cancellationToken);
         return new SubtitleSelectionModel(trackId.Value.ToString(CultureInfo.InvariantCulture), Automatic: false);
     }
@@ -329,7 +334,8 @@ public sealed class SubtitleService(AppDbContext context, IOptions<AppOptions> o
             return 2;
         }
 
-        var normalizedTrackStem = DisplayTitle.NormalizeForSearch(trackBaseStem);
+        var strippedTrackStem = DisplayTitle.FromFolderName(trackBaseStem);
+        var normalizedTrackStem = DisplayTitle.NormalizeForSearch(strippedTrackStem);
         if (normalizedTrackStem.Length > 0
             && (normalizedTrackStem == normalizedTitle
                 || normalizedTrackStem.StartsWith(normalizedTitle + " ", StringComparison.Ordinal)))

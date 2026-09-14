@@ -1,6 +1,5 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using JsxCore;
 using JsxCore.Hosting;
 using JsxCore.Mvc;

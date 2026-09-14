@@ -203,7 +203,7 @@ public class ScannerTests : IAsyncLifetime
             .OrderBy(track => track.RelativePath)
             .ToListAsync(token);
 
-        Assert.Equal(3, subtitles.Count);
+        Assert.Equal(4, subtitles.Count);
         Assert.Contains(subtitles, track => track.Format == "Srt");
         Assert.Contains(subtitles, track => track.Format == "Vtt");
     }

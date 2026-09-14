@@ -43,7 +43,7 @@ public class LibraryEndpointTests(TestApplication application)
         Assert.Equal(4, summary.CourseCount);
         Assert.Equal(8, summary.AvailableLessonCount);
         Assert.Equal(0, summary.MissingLessonCount);
-        Assert.Equal(3, summary.SubtitleTrackCount);
+        Assert.Equal(6, summary.SubtitleTrackCount);
         Assert.True(summary.CatalogRevision > 0);
         Assert.NotNull(summary.LatestScan);
         Assert.Equal("Succeeded", summary.LatestScan.State);
@@ -117,7 +117,7 @@ public class LibraryEndpointTests(TestApplication application)
         Assert.Null(lesson.PreviousLessonId);
         Assert.NotNull(lesson.NextLessonId);
         Assert.Null(lesson.DurationMs);
-        Assert.Equal(0, lesson.SubtitleCandidateCount);
+        Assert.Equal(2, lesson.SubtitleCandidateCount);
     }
 
     [Fact]

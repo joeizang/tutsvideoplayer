@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestones 0–2 executed on 2026-09-13 with explicit user authorization; milestones M3–M7 remain planned. Every M3+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0–3 executed on 2026-09-13 with explicit user authorization; milestones M4–M7 remain planned. Every M4+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -79,14 +79,18 @@ Test totals after the corrections: 43 Core and 91 integration tests pass, one br
 
 Dependencies: M2.
 
-- [ ] Add SRT/VTT validation and safe bounded WebVTT normalization.
-- [ ] Implement matching precedence, language hints, separate Subtitle folders, and ambiguity handling.
-- [ ] Persist explicit associations and global enabled/Off preference.
-- [ ] Add subtitle candidate/menu controls and track lifecycle behavior.
-- [ ] Verify malformed text/encoding and missing-preferred-track messages.
-- [ ] Test subtitle persistence through lesson change, quality-source replacement, and restart.
+Evidence (2026-09-13): all items below completed. The `SubtitleAssociations` migration adds explicit manual associations and normalized-track columns (fingerprint, normalized path, version); normalization writes UTF-8 WebVTT under the application data directory keyed by content fingerprint.
+
+- [x] Add SRT/VTT validation and safe bounded WebVTT normalization.
+- [x] Implement matching precedence, language hints, separate Subtitle folders, and ambiguity handling.
+- [x] Persist explicit associations and global enabled/Off preference.
+- [x] Add subtitle candidate/menu controls and track lifecycle behavior.
+- [x] Verify malformed text/encoding and missing-preferred-track messages.
+- [x] Test subtitle persistence through lesson change, quality-source replacement, and restart.
 
 Exit evidence: adjacent SRT, existing VTT, separate-folder track, manual ambiguous selection, explicit Off, safe cue rendering, original subtitle bytes unchanged.
+
+Recorded results: 61 Core tests (bounded SRT/VTT conversion: CRLF/BOM tolerance, malformed rejection, cue/text limits, unsafe markup escaping, conservative language suffixes) and 105 integration tests (precedence tiers with ambiguity, manual selection persisting through rescans, Off surviving lesson changes, normalized delivery, malformed refusal, missing-preferred-track explanation). Browser-verified against the real library: the adjacent SRT auto-selected, 23 real cues parsed and rendered at their original timings, global Off overrode the selection across lessons, and a rescan left the source SRT bytes byte-identical (SHA-256 verified).
 
 ## M4: Permanent compatible playback copies
 

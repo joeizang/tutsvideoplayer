@@ -91,6 +91,7 @@ app.Run();
 
 public partial class Program
 {
+
     internal static string DescribeRuntime() => RuntimeInformation.FrameworkDescription;
 
     private static async Task MigrateAndExitAsync(WebApplicationBuilder builder)
