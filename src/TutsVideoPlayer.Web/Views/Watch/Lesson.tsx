@@ -36,8 +36,6 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                         <VideoPlayer
                             manifest={manifest}
                             nextLessonId={lesson.nextLessonId ?? null}
-                            autoplayNext={manifest.preferences.autoplay}
-                            onSettingsChanged={() => undefined}
                         />
                     ) : (
                         <div className="flex aspect-video w-full items-center justify-center rounded-lg bg-black p-6 text-center text-sm text-neutral-400">

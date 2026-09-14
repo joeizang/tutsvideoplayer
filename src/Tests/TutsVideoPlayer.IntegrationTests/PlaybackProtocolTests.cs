@@ -44,6 +44,40 @@ public class PlaybackProtocolTests(TestApplication application)
 
     private static long RealLessonDurationMs(PlaybackManifestModel manifest) => manifest.DurationMs ?? 0;
 
+    /// <summary>
+    /// Completion and settings updates require an If-Match precondition, so every test that
+    /// drives them through the normal protocol reads the current revision first.
+    /// </summary>
+    private static async Task<HttpResponseMessage> PutCompletionAsync(
+        HttpClient client,
+        string lessonId,
+        string choice,
+        int? revision = null)
+    {
+        var current = revision ?? (await client.GetFromJsonAsync<CompletionResultModel>(
+            $"/api/v1/lessons/{lessonId}/completion", TestContext.Current.CancellationToken))!.Revision;
+
+        var request = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/lessons/{lessonId}/completion")
+        {
+            Content = JsonContent.Create(new CompletionRequestModel(choice))
+        };
+        request.Headers.IfMatch.ParseAdd($"\"{current}\"");
+        return await client.SendAsync(request, TestContext.Current.CancellationToken);
+    }
+
+    private static async Task<HttpResponseMessage> PutSettingsAsync(HttpClient client, SettingsUpdateModel update)
+    {
+        var current = (await client.GetFromJsonAsync<SettingsModel>(
+            "/api/v1/settings", TestContext.Current.CancellationToken))!.Revision;
+
+        var request = new HttpRequestMessage(HttpMethod.Put, "/api/v1/settings")
+        {
+            Content = JsonContent.Create(update)
+        };
+        request.Headers.IfMatch.ParseAdd($"\"{current}\"");
+        return await client.SendAsync(request, TestContext.Current.CancellationToken);
+    }
+
     [Fact]
     public async Task SessionStartReturnsSavedPositionAndSequenceContinuation()
     {
@@ -113,6 +147,9 @@ public class PlaybackProtocolTests(TestApplication application)
         var client = CreateGuardedClient(application);
         await application.EnsureCatalogScannedAsync();
         var lesson = (await GetAlphaTreeAsync(client)).Nodes.First(node => node.Type == "lesson");
+        // Tests in this collection share one database, so automatic completion is asserted
+        // from a known manual state rather than whatever ran before.
+        (await PutCompletionAsync(client, lesson.Id, "Automatic")).EnsureSuccessStatusCode();
         var session = await StartSessionAsync(client, lesson.Id);
 
         var ended = await WriteProgressAsync(client, session.SessionId, new ProgressWriteModel(
@@ -180,8 +217,7 @@ public class PlaybackProtocolTests(TestApplication application)
         var lesson = (await GetAlphaTreeAsync(client)).Nodes.First(node => node.Type == "lesson");
         var session = await StartSessionAsync(client, lesson.Id);
 
-        var incomplete = await client.PutAsJsonAsync($"/api/v1/lessons/{lesson.Id}/completion",
-            new CompletionRequestModel("Incomplete"), TestContext.Current.CancellationToken);
+        var incomplete = await PutCompletionAsync(client, lesson.Id, "Incomplete");
         incomplete.EnsureSuccessStatusCode();
 
         var ended = await WriteProgressAsync(client, session.SessionId, new ProgressWriteModel(
@@ -191,6 +227,9 @@ public class PlaybackProtocolTests(TestApplication application)
         var manifest = await GetManifestAsync(client, lesson.Id);
         Assert.Equal("Incomplete", manifest.Progress.ManualCompletion);
         Assert.False(manifest.Progress.EffectiveCompletion);
+
+        // Leave the shared lesson on the automatic default for the rest of the collection.
+        (await PutCompletionAsync(client, lesson.Id, "Automatic")).EnsureSuccessStatusCode();
     }
 
     [Fact]
@@ -200,9 +239,24 @@ public class PlaybackProtocolTests(TestApplication application)
         await application.EnsureCatalogScannedAsync();
         var lesson = (await GetAlphaTreeAsync(client)).Nodes.First(node => node.Type == "lesson");
 
-        var first = await client.PutAsJsonAsync($"/api/v1/lessons/{lesson.Id}/completion",
-            new CompletionRequestModel("Completed"), TestContext.Current.CancellationToken);
+        var first = await PutCompletionAsync(client, lesson.Id, "Completed");
         first.EnsureSuccessStatusCode();
+        Assert.NotNull(first.Headers.ETag);
+
+        // A missing precondition must not be treated as "no precondition required": that is
+        // how a stale tab silently replaced a newer manual choice.
+        var unconditional = await client.PutAsJsonAsync($"/api/v1/lessons/{lesson.Id}/completion",
+            new CompletionRequestModel("Incomplete"), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.PreconditionRequired, unconditional.StatusCode);
+        Assert.NotNull(unconditional.Headers.ETag);
+
+        var malformed = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/lessons/{lesson.Id}/completion")
+        {
+            Content = JsonContent.Create(new CompletionRequestModel("Incomplete"))
+        };
+        malformed.Headers.TryAddWithoutValidation("If-Match", "not-a-revision");
+        var malformedResponse = await client.SendAsync(malformed, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.PreconditionRequired, malformedResponse.StatusCode);
 
         var stale = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/lessons/{lesson.Id}/completion")
         {
@@ -213,8 +267,12 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.Equal(HttpStatusCode.PreconditionFailed, staleResponse.StatusCode);
         Assert.NotNull(staleResponse.Headers.ETag);
 
-        var fresh = await client.PutAsJsonAsync($"/api/v1/lessons/{lesson.Id}/completion",
-            new CompletionRequestModel("Automatic"), TestContext.Current.CancellationToken);
+        // The manual choice the stale request tried to replace is still the current one.
+        var afterStale = await client.GetFromJsonAsync<CompletionResultModel>(
+            $"/api/v1/lessons/{lesson.Id}/completion", TestContext.Current.CancellationToken);
+        Assert.Equal("Completed", afterStale!.Choice);
+
+        var fresh = await PutCompletionAsync(client, lesson.Id, "Automatic");
         fresh.EnsureSuccessStatusCode();
     }
 
@@ -228,6 +286,7 @@ public class PlaybackProtocolTests(TestApplication application)
 
         foreach (var lesson in lessons)
         {
+            (await PutCompletionAsync(client, lesson.Id, "Automatic")).EnsureSuccessStatusCode();
             var session = await StartSessionAsync(client, lesson.Id);
             var write = await WriteProgressAsync(client, session.SessionId, new ProgressWriteModel(
                 session.LastSequence + 1, 1, 1_000, IsPlaying: true, Ended: true));
@@ -253,14 +312,17 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.Equal(1, defaults!.PlaybackSpeed);
         Assert.False(defaults.Autoplay);
 
-        var update = await client.PutAsJsonAsync("/api/v1/settings",
-            new SettingsUpdateModel(PlaybackSpeed: 1.5, Autoplay: true, FitMode: "Fill", SubtitleEnabled: null),
+        var unconditional = await client.PutAsJsonAsync("/api/v1/settings",
+            new SettingsUpdateModel(PlaybackSpeed: 1.5, null, null, null),
             TestContext.Current.CancellationToken);
-        update.EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.PreconditionRequired, unconditional.StatusCode);
 
-        var invalid = await client.PutAsJsonAsync("/api/v1/settings",
-            new SettingsUpdateModel(PlaybackSpeed: 1.3, null, null, null),
-            TestContext.Current.CancellationToken);
+        var update = await PutSettingsAsync(client,
+            new SettingsUpdateModel(PlaybackSpeed: 1.5, Autoplay: true, FitMode: "Fill", SubtitleEnabled: null));
+        update.EnsureSuccessStatusCode();
+        Assert.NotNull(update.Headers.ETag);
+
+        var invalid = await PutSettingsAsync(client, new SettingsUpdateModel(PlaybackSpeed: 1.3, null, null, null));
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
 
         var lesson = (await GetAlphaTreeAsync(client)).Nodes.First(node => node.Type == "lesson");
@@ -268,6 +330,8 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.Equal(1.5, manifest.Preferences.Speed);
         Assert.True(manifest.Preferences.Autoplay);
         Assert.Equal("Fill", manifest.Preferences.FitMode);
+        // The player needs a revision to send with its first settings write.
+        Assert.True(manifest.Preferences.Revision > 0);
     }
 
     [Fact]

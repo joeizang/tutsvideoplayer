@@ -30,11 +30,22 @@ public sealed class PlaybackController(LearningService learning) : ControllerBas
             var result = await learning.StartSessionAsync(lessonId, cancellationToken);
             return Created($"/api/v1/lessons/{lessonId}/playback", result);
         }
+        catch (ConcurrentWriteException exception)
+        {
+            return Conflict(ProblemDetailsFor("concurrent-write", exception.Message));
+        }
         catch (InvalidOperationException)
         {
             return NotFound();
         }
     }
+
+    private static ProblemDetails ProblemDetailsFor(string code, string detail) => new()
+    {
+        Title = code,
+        Detail = detail,
+        Status = StatusCodes.Status409Conflict
+    };
 }
 
 [ApiController]
@@ -56,6 +67,10 @@ public sealed class PlaybackSessionController(LearningService learning) : Contro
         try
         {
             return Ok(await learning.HeartbeatAsync(sessionId, renditionId, cancellationToken));
+        }
+        catch (ConcurrentWriteException exception)
+        {
+            return Conflict(ProblemDetailsFor("concurrent-write", exception.Message));
         }
         catch (InvalidOperationException exception) when (exception.Message.Contains("closed", StringComparison.Ordinal))
         {
@@ -81,6 +96,12 @@ public sealed class PlaybackSessionController(LearningService learning) : Contro
         {
             return Conflict(ProblemDetailsFor("stale-session", exception.Message));
         }
+        catch (ConcurrentWriteException exception)
+        {
+            // A write that kept losing the optimistic-concurrency race is retryable, not a
+            // server fault: the client repeats it with the same sequence and is acknowledged.
+            return Conflict(ProblemDetailsFor("concurrent-write", exception.Message));
+        }
         catch (InvalidOperationException)
         {
             return NotFound();
@@ -96,6 +117,10 @@ public sealed class PlaybackSessionController(LearningService learning) : Contro
         try
         {
             return Ok(await learning.CloseSessionAsync(sessionId, body, cancellationToken));
+        }
+        catch (ConcurrentWriteException exception)
+        {
+            return Conflict(ProblemDetailsFor("concurrent-write", exception.Message));
         }
         catch (InvalidOperationException)
         {

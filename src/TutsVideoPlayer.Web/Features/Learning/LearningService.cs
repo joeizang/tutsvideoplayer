@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Core.Learning;
 using TutsVideoPlayer.Infrastructure.Persistence;
@@ -12,6 +13,46 @@ public sealed class LearningService(AppDbContext context)
 {
     public const int HeartbeatIntervalMs = 10_000;
     private const double CompletionThreshold = 0.95;
+
+    /// <summary>
+    /// Revision is an EF concurrency token, so two overlapping writes can both pass their
+    /// in-memory checks and only collide at SaveChanges. Rather than surfacing that as a 500,
+    /// the unit of work is reloaded and re-evaluated: the loser then sees the winner's state
+    /// and produces the documented answer for it — a duplicate acknowledgement, a stale-write
+    /// conflict, or a revision precondition failure.
+    /// </summary>
+    private const int MaxConcurrencyAttempts = 4;
+
+    private async Task<T> WithConcurrencyRetryAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            // Each attempt re-reads through a clean change tracker so the retry evaluates the
+            // committed state rather than the stale entities the failed attempt loaded.
+            context.ChangeTracker.Clear();
+
+            try
+            {
+                return await operation(cancellationToken);
+            }
+            catch (DbUpdateException exception) when (IsRetryableConflict(exception) && attempt < MaxConcurrencyAttempts)
+            {
+            }
+            catch (DbUpdateException exception) when (IsRetryableConflict(exception))
+            {
+                throw new ConcurrentWriteException(description, exception);
+            }
+        }
+    }
+
+    private static bool IsRetryableConflict(DbUpdateException exception) =>
+        exception is DbUpdateConcurrencyException
+        || (exception.InnerException is SqliteException { SqliteExtendedErrorCode: 1555 or 2067 }
+            && exception.Entries.Count > 0
+            && exception.Entries.All(entry => entry.Entity is LessonProgressEntity && entry.State == EntityState.Added));
 
     public async Task<PlaybackManifestModel> BuildManifestAsync(long lessonId, CancellationToken cancellationToken)
     {
@@ -73,10 +114,13 @@ public sealed class LearningService(AppDbContext context)
                 progress?.Revision ?? 0),
             renditionModels,
             readyDefault is null ? null : readyDefault.Id.ToString(CultureInfo.InvariantCulture),
-            new PlaybackPreferencesModel(preferences.PlaybackSpeed, preferences.Autoplay, preferences.FitMode));
+            new PlaybackPreferencesModel(preferences.PlaybackSpeed, preferences.Autoplay, preferences.FitMode, preferences.Revision));
     }
 
-    public async Task<PlaybackSessionStartModel> StartSessionAsync(long lessonId, CancellationToken cancellationToken)
+    public Task<PlaybackSessionStartModel> StartSessionAsync(long lessonId, CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => StartSessionCoreAsync(lessonId, token), "playback session start", cancellationToken);
+
+    private async Task<PlaybackSessionStartModel> StartSessionCoreAsync(long lessonId, CancellationToken cancellationToken)
     {
         var lesson = await context.Lessons
             .Include(candidate => candidate.SourceComponents)
@@ -108,7 +152,10 @@ public sealed class LearningService(AppDbContext context)
             HeartbeatIntervalMs);
     }
 
-    public async Task<HeartbeatResultModel> HeartbeatAsync(long sessionId, long? activeRenditionId, CancellationToken cancellationToken)
+    public Task<HeartbeatResultModel> HeartbeatAsync(long sessionId, long? activeRenditionId, CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => HeartbeatCoreAsync(sessionId, activeRenditionId, token), "heartbeat", cancellationToken);
+
+    private async Task<HeartbeatResultModel> HeartbeatCoreAsync(long sessionId, long? activeRenditionId, CancellationToken cancellationToken)
     {
         var session = await context.PlaybackSessions
             .SingleOrDefaultAsync(candidate => candidate.Id == sessionId, cancellationToken)
@@ -138,7 +185,13 @@ public sealed class LearningService(AppDbContext context)
 
     public sealed record ProgressOutcome(long AcceptedPositionMs, bool EffectiveCompletion, int Revision, bool Duplicate);
 
-    public async Task<ProgressOutcome> WriteProgressAsync(
+    public Task<ProgressOutcome> WriteProgressAsync(
+        long sessionId,
+        ProgressWriteModel command,
+        CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => WriteProgressCoreAsync(sessionId, command, token), "progress write", cancellationToken);
+
+    private async Task<ProgressOutcome> WriteProgressCoreAsync(
         long sessionId,
         ProgressWriteModel command,
         CancellationToken cancellationToken)
@@ -186,7 +239,13 @@ public sealed class LearningService(AppDbContext context)
 
     public sealed record CloseOutcome(bool Closed, bool ProgressFlushed);
 
-    public async Task<CloseOutcome> CloseSessionAsync(
+    public Task<CloseOutcome> CloseSessionAsync(
+        long sessionId,
+        SessionCloseModel? final,
+        CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => CloseSessionCoreAsync(sessionId, final, token), "session close", cancellationToken);
+
+    private async Task<CloseOutcome> CloseSessionCoreAsync(
         long sessionId,
         SessionCloseModel? final,
         CancellationToken cancellationToken)
@@ -229,10 +288,40 @@ public sealed class LearningService(AppDbContext context)
         return new CloseOutcome(Closed: true, ProgressFlushed: flushed);
     }
 
-    public async Task<CompletionResultModel> SetCompletionAsync(
+    public Task<CompletionResultModel> SetCompletionAsync(
         long lessonId,
         CompletionChoice choice,
-        int? ifMatchRevision,
+        int ifMatchRevision,
+        CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => SetCompletionCoreAsync(lessonId, choice, ifMatchRevision, token), "completion update", cancellationToken);
+
+    /// <summary>
+    /// Current completion state without changing anything, so a request that arrives without a
+    /// usable precondition can be answered with the revision it needs to retry.
+    /// </summary>
+    public async Task<CompletionResultModel> GetCompletionAsync(long lessonId, CancellationToken cancellationToken)
+    {
+        var lesson = await context.Lessons.AsNoTracking()
+            .Where(candidate => candidate.Id == lessonId)
+            .Select(candidate => new { candidate.Id, candidate.SourceGeneration })
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Lesson not found.");
+
+        var progress = await context.LessonProgress.AsNoTracking()
+            .SingleOrDefaultAsync(
+                candidate => candidate.LessonId == lesson.Id && candidate.SourceGeneration == lesson.SourceGeneration,
+                cancellationToken);
+
+        return new CompletionResultModel(
+            progress?.ManualCompletion?.ToString() ?? CompletionChoice.Automatic.ToString(),
+            progress is not null && CompletionResolver.IsEffectivelyComplete(progress.AutomaticCompleted, progress.ManualCompletion),
+            progress?.Revision ?? 0);
+    }
+
+    private async Task<CompletionResultModel> SetCompletionCoreAsync(
+        long lessonId,
+        CompletionChoice choice,
+        int ifMatchRevision,
         CancellationToken cancellationToken)
     {
         var lesson = await context.Lessons
@@ -241,7 +330,7 @@ public sealed class LearningService(AppDbContext context)
 
         var progress = await GetOrStartProgressAsync(lesson, cancellationToken);
 
-        if (ifMatchRevision.HasValue && ifMatchRevision.Value != progress.Revision)
+        if (ifMatchRevision != progress.Revision)
         {
             throw new RevisionConflictException(progress.Revision);
         }
@@ -264,8 +353,12 @@ public sealed class LearningService(AppDbContext context)
 
     public async Task<IReadOnlyList<ContinueLearningEntryModel>> ContinueLearningAsync(int take, CancellationToken cancellationToken)
     {
+        // Only the current source generation describes the video the reader would open now.
+        // Rows from a replaced source keep their history, but advertising their position or
+        // completion here would resume into content that no longer exists.
         var rows = await context.LessonProgress.AsNoTracking()
-            .Where(candidate => candidate.LastWatchedUtcMs > 0)
+            .Where(candidate => candidate.LastWatchedUtcMs > 0
+                && candidate.SourceGeneration == candidate.Lesson.SourceGeneration)
             .OrderByDescending(candidate => candidate.LastWatchedUtcMs)
             .Select(candidate => new
             {
@@ -282,6 +375,15 @@ public sealed class LearningService(AppDbContext context)
                 CourseTitle = candidate.Lesson.Course.DisplayTitle
             })
             .ToListAsync(cancellationToken);
+
+        // Superseded rows are not used for recommendations, but their existence is worth
+        // saying out loud so a reader understands why a familiar lesson restarts at zero.
+        var lessonIdsWithHistory = await context.LessonProgress.AsNoTracking()
+            .Where(candidate => candidate.SourceGeneration != candidate.Lesson.SourceGeneration)
+            .Select(candidate => candidate.LessonId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var historical = lessonIdsWithHistory.ToHashSet();
 
         var continueEntries = new List<ContinueLearningEntryModel>();
         var seenCourses = new HashSet<long>();
@@ -314,7 +416,12 @@ public sealed class LearningService(AppDbContext context)
 
             string recommendedLessonId;
             string recommendation;
-            if (effectivelyComplete)
+            if (lessons.Count == 0)
+            {
+                recommendedLessonId = row.LessonId.ToString(CultureInfo.InvariantCulture);
+                recommendation = "unavailable";
+            }
+            else if (effectivelyComplete)
             {
                 var next = lessons.FirstOrDefault(lesson => !lesson.Completed);
                 if (next is null)
@@ -328,10 +435,27 @@ public sealed class LearningService(AppDbContext context)
                     recommendation = "next";
                 }
             }
-            else
+            else if (row.LessonAvailable)
             {
                 recommendedLessonId = row.LessonId.ToString(CultureInfo.InvariantCulture);
                 recommendation = "resume";
+            }
+            else
+            {
+                // The remembered lesson's source has gone missing. Its history is kept, but
+                // Resume must not point at a page that cannot play; the next unfinished
+                // available lesson in the course is a usable recommendation instead.
+                var fallback = lessons.FirstOrDefault(lesson => !lesson.Completed) ?? lessons.FirstOrDefault();
+                if (fallback is null)
+                {
+                    recommendedLessonId = row.LessonId.ToString(CultureInfo.InvariantCulture);
+                    recommendation = "unavailable";
+                }
+                else
+                {
+                    recommendedLessonId = fallback.Id.ToString(CultureInfo.InvariantCulture);
+                    recommendation = "next";
+                }
             }
 
             continueEntries.Add(new ContinueLearningEntryModel(
@@ -344,7 +468,9 @@ public sealed class LearningService(AppDbContext context)
                 lessons.Count(lesson => lesson.Completed),
                 lessons.Count,
                 recommendedLessonId,
-                recommendation));
+                recommendation,
+                row.LessonAvailable,
+                historical.Contains(row.LessonId)));
 
             if (continueEntries.Count >= take)
             {
@@ -366,9 +492,15 @@ public sealed class LearningService(AppDbContext context)
             preferences.Revision);
     }
 
-    public async Task<SettingsModel> UpdateSettingsAsync(
+    public Task<SettingsModel> UpdateSettingsAsync(
         SettingsUpdateModel update,
-        int? ifMatchRevision,
+        int ifMatchRevision,
+        CancellationToken cancellationToken) =>
+        WithConcurrencyRetryAsync(token => UpdateSettingsCoreAsync(update, ifMatchRevision, token), "settings update", cancellationToken);
+
+    private async Task<SettingsModel> UpdateSettingsCoreAsync(
+        SettingsUpdateModel update,
+        int ifMatchRevision,
         CancellationToken cancellationToken)
     {
         if (update.PlaybackSpeed.HasValue && !PlaybackSpeeds.IsAllowed(update.PlaybackSpeed.Value))
@@ -382,7 +514,7 @@ public sealed class LearningService(AppDbContext context)
         }
 
         var preferences = await EnsurePreferencesAsync(cancellationToken);
-        if (ifMatchRevision.HasValue && ifMatchRevision.Value != preferences.Revision)
+        if (ifMatchRevision != preferences.Revision)
         {
             throw new RevisionConflictException(preferences.Revision);
         }
@@ -516,6 +648,13 @@ public sealed class LearningService(AppDbContext context)
 }
 
 public sealed class SessionOwnershipException(string message) : InvalidOperationException(message);
+
+/// <summary>
+/// Raised when a unit of work kept losing an optimistic-concurrency race. Callers translate
+/// it into a retryable conflict rather than an unhandled server error.
+/// </summary>
+public sealed class ConcurrentWriteException(string description, Exception inner)
+    : InvalidOperationException($"The {description} could not be applied because the record kept changing concurrently.", inner);
 
 public sealed class RevisionConflictException(int currentRevision)
     : InvalidOperationException($"The resource changed concurrently; current revision is {currentRevision}.")

@@ -22,7 +22,9 @@ public sealed record RenditionModel(
 public sealed record PlaybackPreferencesModel(
     [property: JsonPropertyName("speed")] double Speed,
     [property: JsonPropertyName("autoplay")] bool Autoplay,
-    [property: JsonPropertyName("fitMode")] string FitMode);
+    [property: JsonPropertyName("fitMode")] string FitMode,
+    // Carried so the player can send an If-Match precondition with its first settings write.
+    [property: JsonPropertyName("revision")] int Revision);
 
 public sealed record PlaybackManifestModel(
     [property: JsonPropertyName("lessonId")] string LessonId,
@@ -87,7 +89,10 @@ public sealed record ContinueLearningEntryModel(
     [property: JsonPropertyName("completedLessons")] int CompletedLessons,
     [property: JsonPropertyName("totalLessons")] int TotalLessons,
     [property: JsonPropertyName("recommendedLessonId")] string RecommendedLessonId,
-    [property: JsonPropertyName("recommendation")] string Recommendation);
+    // "resume", "next", "replay", or "unavailable" when nothing in the course can be played.
+    [property: JsonPropertyName("recommendation")] string Recommendation,
+    [property: JsonPropertyName("lessonAvailable")] bool LessonAvailable,
+    [property: JsonPropertyName("sourceChanged")] bool SourceChanged);
 
 public sealed record SettingsModel(
     [property: JsonPropertyName("playbackSpeed")] double PlaybackSpeed,

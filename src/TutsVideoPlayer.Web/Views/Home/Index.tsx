@@ -48,7 +48,10 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
                         {summary.missingLessonCount > 0 ? ` · ${summary.missingLessonCount} missing` : ""}
                     </p>
                 </div>
-                <RefreshLibraryButton initialScanState={summary.latestScan?.state ?? null} />
+                <RefreshLibraryButton
+                    initialScanState={summary.latestScan?.state ?? null}
+                    initialScanRunId={summary.latestScan?.scanRunId ?? null}
+                />
             </header>
 
             {scanNotice ? (
@@ -129,8 +132,11 @@ function coursesHref(page: number, pageSize: number, query: string | null | unde
     if (page > 1) {
         parameters.push(`page=${page}`);
     }
+    // The effective page size has to travel with the link, or Next lands on a page the
+    // controller sizes with its own default and quietly skips or repeats courses.
+    parameters.push(`pageSize=${pageSize}`);
 
-    return parameters.length > 0 ? `/?${parameters.join("&")}` : "/";
+    return `/?${parameters.join("&")}`;
 }
 
 function CoursePager({ page, pageSize, lastPage, total, query }: {
@@ -161,29 +167,74 @@ function CoursePager({ page, pageSize, lastPage, total, query }: {
     );
 }
 
+function continueHref(entry: ContinueLearningEntryModel): string {
+    // Replay must start the lesson from the beginning. Without an explicit intent the player
+    // restores the saved position, which for a course completed by playing to the end means
+    // opening each lesson a second before it finishes.
+    return entry.recommendation === "replay"
+        ? `/watch/${entry.recommendedLessonId}?replay=1`
+        : `/watch/${entry.recommendedLessonId}`;
+}
+
+function continueNote(entry: ContinueLearningEntryModel): string | null {
+    if (entry.recommendation === "unavailable") {
+        return "The source file is missing and no other lesson in this course is available.";
+    }
+
+    if (!entry.lessonAvailable) {
+        return "That lesson's source file is missing; continuing with the next available lesson.";
+    }
+
+    if (entry.sourceChanged) {
+        return "The source changed since you watched; earlier progress is kept but not used.";
+    }
+
+    return null;
+}
+
 function ContinueRow({ entry }: { entry: ContinueLearningEntryModel }) {
     const clock = formatClock(entry.durationMs);
+    const note = continueNote(entry);
+    const label = entry.recommendation === "replay"
+        ? "Replay course"
+        : entry.recommendation === "next"
+            ? "Start next"
+            : entry.recommendation === "unavailable"
+                ? "Unavailable"
+                : "Resume";
+
     return (
         <li className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-canvas dark:hover:bg-neutral-700">
             <div className="min-w-0">
                 <div className="truncate text-sm font-semibold">
-                    <a href={`/watch/${entry.recommendedLessonId}`} className="text-action">
-                        {entry.recommendation === "replay" ? "Replay " : "Continue "}
-                        {entry.courseTitle}
-                    </a>
+                    {entry.recommendation === "unavailable" ? (
+                        <span>{entry.courseTitle}</span>
+                    ) : (
+                        <a href={continueHref(entry)} className="text-action">
+                            {entry.recommendation === "replay" ? "Replay " : "Continue "}
+                            {entry.courseTitle}
+                        </a>
+                    )}
                 </div>
                 <div className="truncate text-xs text-ink-soft dark:text-neutral-400">
                     {entry.lessonTitle}
                     {entry.positionMs > 0 && clock ? ` · at ${formatClock(entry.positionMs)}${entry.durationMs ? ` of ${clock}` : ""}` : ""}
                     {` · ${entry.completedLessons} of ${entry.totalLessons} complete`}
                 </div>
+                {note ? <div className="truncate text-xs text-danger dark:text-red-400">{note}</div> : null}
             </div>
-            <a
-                href={`/watch/${entry.recommendedLessonId}`}
-                className="rounded-lg bg-action px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
-            >
-                {entry.recommendation === "replay" ? "Replay course" : entry.recommendation === "next" ? "Start next" : "Resume"}
-            </a>
+            {entry.recommendation === "unavailable" ? (
+                <span className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold text-ink-soft dark:border-neutral-600 dark:text-neutral-400">
+                    {label}
+                </span>
+            ) : (
+                <a
+                    href={continueHref(entry)}
+                    className="rounded-lg bg-action px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+                >
+                    {label}
+                </a>
+            )}
         </li>
     );
 }

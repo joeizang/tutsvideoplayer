@@ -71,6 +71,10 @@ Exit evidence: watch/pause/restart/resume flow, backward-seek persistence, manua
 
 Recorded results: browser-verified against the real library — playback, backward seek with position restore at 12.443 s after reload, ended/95% completion, manual incomplete surviving an ended signal, and the Continue learning shelf recommending next/replay. Integration tests cover stale-session rejection (409), duplicate sequence acknowledgement, close idempotency, If-Match completion conflicts (412), ready/stale rendition gating, and range delivery through `/media/renditions/{id}`; delivery streams via framework file results without full-file buffering.
 
+Post-review corrections (PR #3 review, [m2-review-comments.md](../m2-review-comments.md)): media delivery rejects a symbolic link in any ancestor of the requested path, not only the terminal file; completion and settings updates require an If-Match precondition and answer a missing or malformed one with 428 plus the current revision, and every mutating response carries an ETag; optimistic-concurrency losses are reloaded and re-evaluated so they resolve as documented duplicates, 412s or retryable 409s rather than 500s; the navigation flush is a keepalive fetch carrying the required header and is driven by `pagehide` rather than effect cleanup alone; active-scan observation on mount is restored; autoplay-next follows the live preference and carries an explicit play intent with a visible fallback when the browser refuses; all three completion choices stay reachable; a failed playback-session start is shown with a working retry; Continue learning is limited to each lesson's current source generation and recommends an available lesson when the remembered one is missing; Replay course starts at zero; and course pagination links carry the effective page size.
+
+Test totals after the corrections: 43 Core and 91 integration tests pass, one browser placeholder skipped. Linux deployment and broad codec/browser compatibility were not re-tested.
+
 ## M3: Subtitle discovery and selection
 
 Dependencies: M2.

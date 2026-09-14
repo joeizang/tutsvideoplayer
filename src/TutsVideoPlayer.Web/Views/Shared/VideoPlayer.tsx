@@ -4,24 +4,46 @@ import { formatDuration } from "./format.ts";
 
 const HEARTBEAT_MS = 10_000;
 const PROGRESS_SAVE_MS = 10_000;
+const REQUEST_HEADERS = {
+    "Content-Type": "application/json",
+    "X-TutsVideoPlayer-Request": "same-origin"
+};
 
-type StaleState = "none" | "unsaved" | "taken-over";
+type StaleState = "none" | "unsaved" | "taken-over" | "no-session";
+type ManualCompletion = "Completed" | "Incomplete" | null;
+
+/**
+ * Navigation intent carried in the query string. `autoplay=1` is set when the previous
+ * lesson ended with Autoplay next enabled; `replay=1` is set by Replay course, which must
+ * start at the beginning rather than restoring a position at the very end of the video.
+ */
+function readIntent(): { autoplay: boolean; replay: boolean } {
+    if (typeof window === "undefined") {
+        return { autoplay: false, replay: false };
+    }
+
+    const search = new URLSearchParams(window.location.search);
+    return { autoplay: search.get("autoplay") === "1", replay: search.get("replay") === "1" };
+}
 
 export function VideoPlayer({
     manifest,
     nextLessonId,
-    autoplayNext,
     onSettingsChanged
 }: {
     manifest: PlaybackManifestModel;
     nextLessonId: string | null;
-    autoplayNext: boolean;
-    onSettingsChanged: () => void;
+    onSettingsChanged?: () => void;
 }) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const sessionRef = useRef<string | null>(null);
-    const sequenceRef = useRef(manifest.progress.revision >= 0 ? 0 : 0);
+    const sequenceRef = useRef(0);
+    const closingRef = useRef(false);
+    const resumeOnceRef = useRef(false);
+    const replayRef = useRef(false);
+    const playIntentRef = useRef(false);
+    const autoplayRef = useRef(manifest.preferences.autoplay);
 
     const [rendition] = useState(
         manifest.renditions.find((candidate) => candidate.id === manifest.readyDefaultRenditionId && candidate.mediaUrl)
@@ -32,6 +54,13 @@ export function VideoPlayer({
     const [currentTimeMs, setCurrentTimeMs] = useState(manifest.progress.positionMs);
     const [durationMs, setDurationMs] = useState(manifest.durationMs ?? 0);
     const [completed, setCompleted] = useState(manifest.progress.effectiveCompletion);
+    const [manual, setManual] = useState<ManualCompletion>(
+        manifest.progress.manualCompletion === "Completed" || manifest.progress.manualCompletion === "Incomplete"
+            ? manifest.progress.manualCompletion
+            : null);
+    const [completionRevision, setCompletionRevision] = useState(manifest.progress.revision);
+    const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+    const [settingsRevision, setSettingsRevision] = useState(manifest.preferences.revision);
     const [speed, setSpeed] = useState(manifest.preferences.speed);
     const [fit, setFit] = useState<"Contain" | "Fill">(manifest.preferences.fitMode === "Fill" ? "Fill" : "Contain");
     const [muted, setMuted] = useState(false);
@@ -42,10 +71,54 @@ export function VideoPlayer({
 
     const currentMediaUrl = rendition?.mediaUrl ?? null;
 
+    // Read once on mount: the server render has no location, so the intent cannot be a prop.
+    useEffect(() => {
+        const intent = readIntent();
+        replayRef.current = intent.replay;
+        playIntentRef.current = intent.autoplay || intent.replay;
+        if (intent.replay) {
+            // Suppress the saved-position restore without touching stored completion history.
+            resumeOnceRef.current = true;
+            setSavedPositionMs(0);
+            const video = videoRef.current;
+            if (video) {
+                video.currentTime = 0;
+            }
+        }
+    }, []);
+
+    useEffect(() => {
+        autoplayRef.current = autoplay;
+    }, [autoplay]);
+
+    const attemptIntentPlay = useCallback(() => {
+        if (!playIntentRef.current) {
+            return;
+        }
+
+        playIntentRef.current = false;
+        const video = videoRef.current;
+        if (!video) {
+            return;
+        }
+
+        // Browsers may refuse programmatic playback that is not tied to a gesture. The
+        // rejection is surfaced as the overlay play button rather than a silently paused page.
+        video.play().catch(() => setNeedsGesture(true));
+    }, []);
+
     const writeProgress = useCallback(async (options: { isPlaying: boolean; ended?: boolean; keepalive?: boolean }) => {
         const video = videoRef.current;
         const sessionId = sessionRef.current;
-        if (!video || !sessionId) {
+        if (!video) {
+            return;
+        }
+
+        if (!sessionId) {
+            // Silently returning here is what allowed playback to continue for an entire
+            // lesson without a single position ever being saved.
+            setStale("no-session");
+            setStaleMessage("No playback session is active, so your position is not being saved.");
             return;
         }
 
@@ -61,7 +134,7 @@ export function VideoPlayer({
         try {
             const response = await fetch(`/api/v1/playback-sessions/${sessionId}/progress`, {
                 method: "PUT",
-                headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
+                headers: REQUEST_HEADERS,
                 body: JSON.stringify(body),
                 keepalive: options.keepalive ?? false
             });
@@ -71,6 +144,9 @@ export function VideoPlayer({
                 setStaleMessage(null);
                 const result = await response.json();
                 setCompleted(result.effectiveCompletion);
+                // Progress writes share the lesson's revision, so the completion precondition
+                // has to follow along or the next manual choice would look stale.
+                setCompletionRevision(result.revision);
                 if (options.ended) {
                     setSavedPositionMs(result.acceptedPositionMs);
                 }
@@ -91,60 +167,85 @@ export function VideoPlayer({
         try {
             const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/playback-sessions`, {
                 method: "POST",
-                headers: { "X-TutsVideoPlayer-Request": "same-origin" }
+                headers: REQUEST_HEADERS
             });
             if (!response.ok) {
-                setStaleMessage("A playback session could not be started. Progress will not be saved.");
+                sessionRef.current = null;
+                setStale("no-session");
+                setStaleMessage(`A playback session could not be started (status ${response.status}). Your position is not being saved.`);
                 return;
             }
 
             const started = await response.json();
             sessionRef.current = started.sessionId;
             sequenceRef.current = started.lastSequence;
-            setSavedPositionMs(started.savedPositionMs);
-            const video = videoRef.current;
-            if (video && started.savedPositionMs > 0 && video.readyState >= 1) {
-                resumeOnceRef.current = false;
-                video.currentTime = Math.min(started.savedPositionMs / 1000, Math.max(0, video.duration - 1));
-                resumeOnceRef.current = true;
+            closingRef.current = false;
+            setCompletionRevision(started.progressRevision);
+
+            if (replayRef.current) {
+                setSavedPositionMs(0);
+            } else {
+                setSavedPositionMs(started.savedPositionMs);
+                const video = videoRef.current;
+                if (video && started.savedPositionMs > 0 && video.readyState >= 1) {
+                    resumeOnceRef.current = false;
+                    video.currentTime = Math.min(started.savedPositionMs / 1000, Math.max(0, video.duration - 1));
+                    resumeOnceRef.current = true;
+                }
             }
+
             setStale("none");
             setStaleMessage(null);
         } catch {
-            setStaleMessage("A playback session could not be started. Progress will not be saved.");
+            sessionRef.current = null;
+            setStale("no-session");
+            setStaleMessage("A playback session could not be started. Your position is not being saved.");
         }
     }, [manifest.lessonId]);
 
-    const closeSession = useCallback((keepalive: boolean) => {
+    /**
+     * Final flush for navigation and page lifecycle. A keepalive fetch is used rather than
+     * sendBeacon because a beacon cannot carry the custom same-origin header the mutation
+     * filter requires, so beacon-shaped closes were simply rejected. The server treats an
+     * already-closed session as closed, so repeating this is harmless.
+     */
+    const closeSession = useCallback(() => {
         const sessionId = sessionRef.current;
-        const video = videoRef.current;
-        if (!sessionId || !video) {
+        if (!sessionId || closingRef.current) {
             return;
         }
 
+        closingRef.current = true;
+        const video = videoRef.current;
+        sequenceRef.current += 1;
         const body = JSON.stringify({
-            sequence: sequenceRef.current + 1,
-            positionMs: Math.round(video.currentTime * 1000)
+            sequence: sequenceRef.current,
+            positionMs: video ? Math.round(video.currentTime * 1000) : 0
         });
-        if (keepalive) {
-            navigator.sendBeacon?.(
-                `/api/v1/playback-sessions/${sessionId}/close`,
-                new Blob([body], { type: "application/json" }));
-        } else {
-            fetch(`/api/v1/playback-sessions/${sessionId}/close`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-                body,
-                keepalive: true
-            }).catch(() => undefined);
-        }
+
+        fetch(`/api/v1/playback-sessions/${sessionId}/close`, {
+            method: "POST",
+            headers: REQUEST_HEADERS,
+            body,
+            keepalive: true
+        }).catch(() => undefined);
+
         sessionRef.current = null;
     }, []);
 
     useEffect(() => {
         void startSession();
-        return () => closeSession(true);
+        return () => closeSession();
     }, [startSession, closeSession]);
+
+    // Previous/Next, rail links and closing the tab are ordinary full-page navigations, which
+    // React effect cleanup does not reliably observe. pagehide fires for all of them, so a
+    // lesson change no longer depends on the ten-second timer having happened to fire.
+    useEffect(() => {
+        const onPageHide = () => closeSession();
+        window.addEventListener("pagehide", onPageHide);
+        return () => window.removeEventListener("pagehide", onPageHide);
+    }, [closeSession]);
 
     useEffect(() => {
         const heartbeat = window.setInterval(() => {
@@ -155,7 +256,7 @@ export function VideoPlayer({
 
             fetch(`/api/v1/playback-sessions/${sessionId}/heartbeat`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
+                headers: REQUEST_HEADERS,
                 body: JSON.stringify({ activeRenditionId: rendition?.id ?? null })
             }).catch(() => undefined);
         }, HEARTBEAT_MS);
@@ -165,13 +266,13 @@ export function VideoPlayer({
 
     useEffect(() => {
         const progressTimer = window.setInterval(() => {
-            if (playing && !document.hidden && stale !== "taken-over") {
+            if (playing && !document.hidden && stale !== "taken-over" && sessionRef.current) {
                 void writeProgress({ isPlaying: true });
             }
         }, PROGRESS_SAVE_MS);
 
         const onHidden = () => {
-            if (document.hidden && stale !== "taken-over") {
+            if (document.hidden && stale !== "taken-over" && sessionRef.current) {
                 void writeProgress({ isPlaying: false, keepalive: true });
             }
         };
@@ -190,7 +291,6 @@ export function VideoPlayer({
         }
     }, [speed]);
 
-    const resumeOnceRef = useRef(false);
     const resumeToSavedPosition = useCallback(() => {
         const video = videoRef.current;
         if (!video || resumeOnceRef.current || savedPositionMs <= 0 || video.duration <= 0) {
@@ -206,8 +306,9 @@ export function VideoPlayer({
         if (video && video.readyState >= 1) {
             setDurationMs(video.duration > 0 ? Math.round(video.duration * 1000) : 0);
             resumeToSavedPosition();
+            attemptIntentPlay();
         }
-    }, [resumeToSavedPosition]);
+    }, [resumeToSavedPosition, attemptIntentPlay]);
 
     const onLoadedMetadata = () => {
         const video = videoRef.current;
@@ -217,6 +318,7 @@ export function VideoPlayer({
 
         setDurationMs(video.duration > 0 ? Math.round(video.duration * 1000) : 0);
         resumeToSavedPosition();
+        attemptIntentPlay();
     };
 
     const onPlay = () => {
@@ -232,8 +334,11 @@ export function VideoPlayer({
     const onEnded = () => {
         setPlaying(false);
         void writeProgress({ isPlaying: false, ended: true }).then(() => {
-            if (autoplayNext && nextLessonId) {
-                window.location.href = `/watch/${nextLessonId}`;
+            // The live preference, not the value this page was rendered with: a checkbox
+            // toggled during playback has to take effect at the end of this lesson.
+            if (autoplayRef.current && nextLessonId) {
+                closeSession();
+                window.location.href = `/watch/${nextLessonId}?autoplay=1`;
             }
         });
     };
@@ -265,59 +370,87 @@ export function VideoPlayer({
         }
     };
 
-    const setSpeedAndPersist = async (value: number) => {
-        setSpeed(value);
-        await fetch("/api/v1/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-            body: JSON.stringify({ playbackSpeed: value })
-        }).catch(() => undefined);
-        onSettingsChanged();
-    };
+    const putSettings = async (update: Record<string, unknown>, revert: () => void) => {
+        try {
+            const response = await fetch("/api/v1/settings", {
+                method: "PUT",
+                headers: { ...REQUEST_HEADERS, "If-Match": `"${settingsRevision}"` },
+                body: JSON.stringify(update)
+            });
 
-    const setFitAndPersist = async (value: "Contain" | "Fill") => {
-        setFit(value);
-        await fetch("/api/v1/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-            body: JSON.stringify({ fitMode: value })
-        }).catch(() => undefined);
-        onSettingsChanged();
-    };
+            if (response.ok) {
+                const result = await response.json();
+                setSettingsRevision(result.revision);
+                onSettingsChanged?.();
+                return;
+            }
 
-    const setAutoplayAndPersist = async (value: boolean) => {
-        setAutoplay(value);
-        await fetch("/api/v1/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-            body: JSON.stringify({ autoplay: value })
-        }).catch(() => undefined);
-        onSettingsChanged();
-    };
+            if (response.status === 412 || response.status === 428) {
+                // Someone else changed settings first. Adopt their values rather than
+                // silently replacing them with this tab's stale view.
+                const current = await fetch("/api/v1/settings").then((latest) => latest.json());
+                setSettingsRevision(current.revision);
+                setSpeed(current.playbackSpeed);
+                setAutoplay(current.autoplay);
+                setFit(current.fitMode === "Fill" ? "Fill" : "Contain");
+                return;
+            }
 
-    const markCompleted = async () => {
-        const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/completion`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-            body: JSON.stringify({ choice: "Completed" })
-        });
-        if (response.ok) {
-            const result = await response.json();
-            setCompleted(result.effectiveCompletion);
-        } else if (response.status === 412) {
-            window.location.reload();
+            revert();
+        } catch {
+            revert();
         }
     };
 
-    const useAutomatic = async () => {
-        const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/completion`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json", "X-TutsVideoPlayer-Request": "same-origin" },
-            body: JSON.stringify({ choice: "Automatic" })
-        });
-        if (response.ok) {
-            const result = await response.json();
-            setCompleted(result.effectiveCompletion);
+    const setSpeedAndPersist = async (value: number) => {
+        const previous = speed;
+        setSpeed(value);
+        await putSettings({ playbackSpeed: value }, () => setSpeed(previous));
+    };
+
+    const setFitAndPersist = async (value: "Contain" | "Fill") => {
+        const previous = fit;
+        setFit(value);
+        await putSettings({ fitMode: value }, () => setFit(previous));
+    };
+
+    const setAutoplayAndPersist = async (value: boolean) => {
+        const previous = autoplay;
+        setAutoplay(value);
+        await putSettings({ autoplay: value }, () => setAutoplay(previous));
+    };
+
+    const setCompletionChoice = async (choice: "Completed" | "Incomplete" | "Automatic") => {
+        setCompletionMessage(null);
+        try {
+            const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/completion`, {
+                method: "PUT",
+                headers: { ...REQUEST_HEADERS, "If-Match": `"${completionRevision}"` },
+                body: JSON.stringify({ choice })
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                setCompleted(result.effectiveCompletion);
+                setCompletionRevision(result.revision);
+                setManual(choice === "Automatic" ? null : choice);
+                return;
+            }
+
+            if (response.status === 412 || response.status === 428) {
+                // Reload the current choice and say so, instead of overwriting whatever the
+                // other tab or device just decided.
+                const current = await fetch(`/api/v1/lessons/${manifest.lessonId}/completion`).then((latest) => latest.json());
+                setCompleted(current.effectiveCompletion);
+                setCompletionRevision(current.revision);
+                setManual(current.choice === "Completed" || current.choice === "Incomplete" ? current.choice : null);
+                setCompletionMessage("This lesson changed elsewhere; the latest choice is shown. Apply yours again if you still want it.");
+                return;
+            }
+
+            setCompletionMessage(`The completion choice could not be saved (status ${response.status}).`);
+        } catch {
+            setCompletionMessage("The completion choice could not be saved.");
         }
     };
 
@@ -366,6 +499,8 @@ export function VideoPlayer({
             </div>
         );
     }
+
+    const secondaryAction = "rounded-md border border-ink/15 bg-surface px-2.5 py-1 text-sm text-ink hover:bg-canvas";
 
     return (
         <div
@@ -483,23 +618,50 @@ export function VideoPlayer({
                 </label>
             </div>
 
+            {/* All three supported choices stay reachable: the automatic result and the manual
+                override are independent, so neither state can hide the action that undoes it. */}
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-                {completed ? (
-                    <span className="inline-flex items-center gap-1 rounded-md bg-completion/10 px-2 py-1 text-completion">
-                        ✓ Completed
-                        <button type="button" onClick={() => void useAutomatic()} className="underline hover:no-underline">
-                            Use automatic
-                        </button>
-                    </span>
-                ) : (
-                    <button
-                        type="button"
-                        onClick={() => void markCompleted()}
-                        className="rounded-md border border-completion/40 px-2.5 py-1 text-completion hover:bg-completion/10"
-                    >
+                <span
+                    className={completed
+                        ? "inline-flex items-center gap-1 rounded-md bg-completion/10 px-2 py-1 text-completion"
+                        : "inline-flex items-center gap-1 rounded-md bg-ink/5 px-2 py-1 text-ink-soft"}
+                >
+                    {completed ? "✓ Completed" : "Not completed"}
+                    {manual ? ` (manual: ${manual})` : " (automatic)"}
+                </span>
+                {manual !== "Completed" ? (
+                    <button type="button" onClick={() => void setCompletionChoice("Completed")} className={secondaryAction}>
                         Mark completed
                     </button>
-                )}
+                ) : null}
+                {manual !== "Incomplete" ? (
+                    <button type="button" onClick={() => void setCompletionChoice("Incomplete")} className={secondaryAction}>
+                        Mark incomplete
+                    </button>
+                ) : null}
+                {manual !== null ? (
+                    <button type="button" onClick={() => void setCompletionChoice("Automatic")} className={secondaryAction}>
+                        Use automatic
+                    </button>
+                ) : null}
+                {completionMessage ? (
+                    <span role="alert" className="text-danger">{completionMessage}</span>
+                ) : null}
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                {stale === "no-session" ? (
+                    <span role="alert" className="inline-flex items-center gap-2 text-danger">
+                        {staleMessage}
+                        <button
+                            type="button"
+                            onClick={() => void startSession()}
+                            className="rounded border border-danger/40 px-2 py-0.5"
+                        >
+                            Retry saving progress
+                        </button>
+                    </span>
+                ) : null}
                 {stale === "unsaved" ? (
                     <span role="alert" className="inline-flex items-center gap-2 text-danger">
                         {staleMessage}
