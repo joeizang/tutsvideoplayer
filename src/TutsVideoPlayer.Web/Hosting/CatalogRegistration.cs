@@ -40,6 +40,8 @@ public static class CatalogRegistration
         services.AddScoped<LibraryScanner>();
         services.AddScoped<LearningService>();
         services.AddScoped<SubtitleService>();
+        services.AddScoped<CacheAccounting>();
+        services.AddScoped<CacheEvictionService>();
         services.AddSingleton<ScanCoordinator>();
         services.AddHostedService<StartupMigrationCheck>();
         services.AddHostedService<StartupScanService>();

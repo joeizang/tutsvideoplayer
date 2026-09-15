@@ -45,9 +45,10 @@ export function VideoPlayer({
     const playIntentRef = useRef(false);
     const autoplayRef = useRef(manifest.preferences.autoplay);
 
-    const [rendition] = useState(
-        manifest.renditions.find((candidate) => candidate.id === manifest.readyDefaultRenditionId && candidate.mediaUrl)
-        ?? manifest.renditions.find((candidate) => candidate.mediaUrl));
+    const [selectedRenditionId, setSelectedRenditionId] = useState(manifest.readyDefaultRenditionId);
+    const rendition = manifest.renditions.find((candidate) => candidate.id === selectedRenditionId && candidate.mediaUrl)
+        ?? manifest.renditions.find((candidate) => candidate.mediaUrl);
+    const [switching, setSwitching] = useState<{ timeMs: number; wasPlaying: boolean } | null>(null);
     const [savedPositionMs, setSavedPositionMs] = useState(manifest.progress.positionMs);
     const [playing, setPlaying] = useState(false);
     const [buffering, setBuffering] = useState(false);
@@ -300,13 +301,28 @@ export function VideoPlayer({
 
     const resumeToSavedPosition = useCallback(() => {
         const video = videoRef.current;
-        if (!video || resumeOnceRef.current || savedPositionMs <= 0 || video.duration <= 0) {
+        if (!video || video.duration <= 0) {
+            return;
+        }
+
+        if (switching !== null) {
+            // A quality switch restores position and pause state instead of the saved position.
+            video.currentTime = Math.min(switching.timeMs / 1000, Math.max(0, video.duration - 1));
+            if (switching.wasPlaying) {
+                void video.play().catch(() => setNeedsGesture(true));
+            }
+
+            setSwitching(null);
+            return;
+        }
+
+        if (resumeOnceRef.current || savedPositionMs <= 0) {
             return;
         }
 
         resumeOnceRef.current = true;
         video.currentTime = Math.min(savedPositionMs / 1000, Math.max(0, video.duration - 1));
-    }, [savedPositionMs]);
+    }, [savedPositionMs, switching]);
 
     useEffect(() => {
         const video = videoRef.current;
@@ -568,6 +584,28 @@ export function VideoPlayer({
             ?? "This subtitle file could not be prepared. Choose another from the Subtitles menu.");
     };
 
+    const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
+    const switchRendition = (renditionId: string) => {
+        const video = videoRef.current;
+        if (!video || renditionId === selectedRenditionId) {
+            setQualityMenuOpen(false);
+            return;
+        }
+
+        const target = manifest.renditions.find((candidate) => candidate.id === renditionId && candidate.mediaUrl);
+        if (!target) {
+            setQualityMenuOpen(false);
+            return;
+        }
+
+        // PLAY-05: the switch preserves position and pause state; speed, volume and
+        // subtitles already live outside the source.
+        setSwitching({ timeMs: Math.round(video.currentTime * 1000), wasPlaying: !video.paused });
+        setSelectedRenditionId(renditionId);
+        setQualityMenuOpen(false);
+        video.pause();
+    };
+
     const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
         const target = event.target as HTMLElement;
         if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA") {
@@ -729,6 +767,45 @@ export function VideoPlayer({
                 >
                     {muted ? "Unmute" : "Mute"}
                 </button>
+                <div className="relative">
+                    <button
+                        type="button"
+                        onClick={() => setQualityMenuOpen((open) => !open)}
+                        className="rounded-md border border-ink/15 bg-surface px-2.5 py-1.5 text-sm text-ink hover:bg-canvas"
+                        title="Quality"
+                    >
+                        {rendition?.label ?? "Quality"}
+                    </button>
+                    {qualityMenuOpen ? (
+                        <div className="absolute bottom-full z-10 mb-1 w-72 rounded-lg border border-ink/10 bg-surface p-2 text-sm shadow-lg dark:border-neutral-600 dark:bg-neutral-800">
+                            {manifest.renditions.length === 0 ? (
+                                <p className="px-2 py-1 text-ink-soft">No renditions available.</p>
+                            ) : (
+                                <ul className="m-0 max-h-64 list-none overflow-y-auto p-0">
+                                    {manifest.renditions.map((candidate) => (
+                                        <li key={candidate.id}>
+                                            <button
+                                                type="button"
+                                                disabled={!candidate.mediaUrl}
+                                                onClick={() => switchRendition(candidate.id)}
+                                                className="w-full rounded px-2 py-1 text-left hover:bg-canvas disabled:opacity-50 dark:hover:bg-neutral-700"
+                                            >
+                                                <span className="font-medium">{candidate.label}</span>
+                                                <span className="ml-1 text-xs text-ink-soft">
+                                                    {candidate.state === "Ready"
+                                                        ? candidate.retentionClass === "Permanent" ? "permanent copy" : "original"
+                                                        : candidate.state === "Pending" || candidate.state === "Running"
+                                                            ? `preparing… (${Math.round((candidate.progress ?? 0) * 100)}%)`
+                                                            : candidate.state}
+                                                </span>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    ) : null}
+                </div>
                 <div className="relative">
                     <button
                         type="button"

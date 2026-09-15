@@ -41,9 +41,13 @@ public sealed class PreparationWorker(
                 probeAdapter,
                 ffmpegAdapter,
                 new PreparedOutputValidator(probeAdapter),
+                recoveryScope.ServiceProvider.GetRequiredService<CacheAccounting>(),
+                recoveryScope.ServiceProvider.GetRequiredService<CacheEvictionService>(),
                 recoveryScope.ServiceProvider.GetRequiredService<ILogger<PreparationExecutor>>());
 
             await recoveryExecutor.RecoverInterruptedAsync(stoppingToken);
+            await recoveryScope.ServiceProvider.GetRequiredService<CacheEvictionService>()
+                .ReconcileInterruptedEvictionsAsync(stoppingToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -78,6 +82,8 @@ public sealed class PreparationWorker(
                     probeAdapter,
                     ffmpegAdapter,
                     new PreparedOutputValidator(probeAdapter),
+                    scope.ServiceProvider.GetRequiredService<CacheAccounting>(),
+                    scope.ServiceProvider.GetRequiredService<CacheEvictionService>(),
                     scope.ServiceProvider.GetRequiredService<ILogger<PreparationExecutor>>());
 
                 logger.LogInformation("Claimed preparation job {JobId} (attempt {Attempt}).", claimed.Id, claimed.Attempt);
