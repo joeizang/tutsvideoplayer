@@ -71,12 +71,13 @@ public sealed class LibraryScanner(
             run.FinishedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
 
             logger.LogInformation(
                 "Scan {ScanRunId} discovered {LessonCount} lessons and {SubtitleCount} subtitle candidates with {IssueCount} issues.",
                 scanRunId, discovered.Lessons.Count, discovered.Subtitles.Count, issueBuffer.Count);
 
+            await transaction.CommitAsync(cancellationToken);
+            await PreparationScheduler.ScheduleCompatibilityJobsAsync(context, library.Id, logger, cancellationToken);
             return new ScanOutcome(discovered.Lessons.Count, discovered.Subtitles.Count, Succeeded: true);
         }
         catch (OperationCanceledException)
@@ -112,6 +113,11 @@ public sealed class LibraryScanner(
 
         foreach (var file in enumeration.Files)
         {
+            if (MediaFileClassification.IsManagedOutputName(Path.GetFileName(file.RelativePath)))
+            {
+                continue;
+            }
+
             var segments = file.RelativePath.Split('/');
             string? reservedAncestor = null;
             foreach (var segment in segments[..^1])
@@ -647,7 +653,7 @@ public sealed class LibraryScanner(
         await context.SaveChangesAsync(cancellationToken);
     }
 
-    internal static ProbeMetadata? ParseProbeMetadata(string? json)
+    public static ProbeMetadata? ParseProbeMetadata(string? json)
     {
         if (json is null)
         {

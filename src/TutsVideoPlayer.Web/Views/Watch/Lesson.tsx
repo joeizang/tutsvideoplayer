@@ -1,5 +1,6 @@
 import type { ViewProps } from "dotnet:rendering";
 import type { WatchLessonModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
+import { useEffect, useState } from "react";
 import { LessonRail } from "../Shared/LessonRail.tsx";
 import { VideoPlayer } from "../Shared/VideoPlayer.tsx";
 import "/css/app.css";
@@ -12,8 +13,40 @@ export const head = (model: WatchLessonModel) => ({
 export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
     const lesson = model.lesson;
     const missing = lesson.availability !== "Available";
-    const manifest = model.manifest;
+    const [manifest, setManifest] = useState(model.manifest);
     const playable = manifest != null && manifest.readyDefaultRenditionId != null;
+    const preparingJob = manifest?.renditions.find((rendition) => rendition.preparationJobId !== null);
+    const preparing = !playable && preparingJob != null && preparingJob.state !== "Failed"
+        && (preparingJob.state === "Queued" || preparingJob.state === "Running"
+            || preparingJob.state === "Validating" || preparingJob.state === "Publishing");
+    const preparingLabel = preparingJob?.state === "Queued"
+        ? "Queued for preparation. You can prioritize it from the library queue."
+        : preparingJob?.state === "Blocked" || preparingJob?.state === "Failed"
+            ? preparingJob.userMessage ?? "Preparation is not possible for this lesson right now."
+            : "Preparing this lesson for playback.";
+
+    useEffect(() => {
+        if (playable || missing || !preparingJob) {
+            return;
+        }
+
+        const timer = window.setInterval(async () => {
+            try {
+                const response = await fetch(`/api/v1/lessons/${lesson.id}/playback`);
+                if (response.ok) {
+                    const updated = await response.json();
+                    setManifest(updated);
+                    if (updated.readyDefaultRenditionId != null) {
+                        window.location.reload();
+                    }
+                }
+            } catch {
+                return;
+            }
+        }, 2000);
+
+        return () => window.clearInterval(timer);
+    }, [playable, missing, preparingJob, lesson.id]);
 
     return (
         <main className="flex min-h-screen flex-col bg-canvas text-ink dark:bg-neutral-900 dark:text-neutral-100">
@@ -32,6 +65,17 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                         <p role="alert" className="mb-4 rounded-lg border border-danger/30 bg-surface p-4 text-danger dark:bg-neutral-800">
                             The source file is unavailable. <a href="/" className="underline">Refresh library</a> to look for it again.
                         </p>
+                    ) : preparing ? (
+                        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-lg bg-black text-center text-sm text-neutral-300">
+                            <span>{preparingLabel}</span>
+                            <div className="h-1.5 w-56 overflow-hidden rounded bg-neutral-700">
+                                <div
+                                    className="h-full bg-action transition-all"
+                                    style={{ width: `${Math.round((preparingJob?.progress ?? 0) * 100)}%` }}
+                                />
+                            </div>
+                            <a href="/" className="text-action">View library</a>
+                        </div>
                     ) : playable && manifest ? (
                         <VideoPlayer
                             manifest={manifest}

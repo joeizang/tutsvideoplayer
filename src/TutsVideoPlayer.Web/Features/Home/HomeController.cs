@@ -4,6 +4,7 @@ using JsxCore;
 using JsxCore.Hosting;
 using JsxCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Models;
@@ -72,6 +73,7 @@ public sealed class HomeController(AppDbContext context, LearningService learnin
             .ToListAsync(cancellationToken);
 
         var continueEntries = await learning.ContinueLearningAsync(5, cancellationToken);
+        var queue = await BuildQueueSummaryAsync(cancellationToken);
 
         var model = new LibraryHomeModel(
             new LibrarySummaryModel(
@@ -95,11 +97,29 @@ public sealed class HomeController(AppDbContext context, LearningService learnin
                 new LibraryStatusModel(true, true, true)),
             courses,
             continueEntries,
+            queue,
             searchQuery,
             page,
             effectivePageSize,
             matchingCourseCount);
 
         return this.Jsx("Home/Index", model, RenderMode.ServerAndClient);
+    }
+
+    private async Task<QueueSummaryModel> BuildQueueSummaryAsync(CancellationToken cancellationToken)
+    {
+        var preferences = await context.Preferences.AsNoTracking().SingleOrDefaultAsync(cancellationToken);
+        var counts = await context.PreparationJobs.AsNoTracking()
+            .GroupBy(job => job.State)
+            .Select(group => new { group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+
+        return new QueueSummaryModel(
+            preferences?.QueuePaused ?? false,
+            preferences?.Revision ?? 0,
+            counts.FirstOrDefault(group => group.Key == PreparationJobState.Running)?.Count ?? 0,
+            counts.FirstOrDefault(group => group.Key == PreparationJobState.Queued)?.Count ?? 0,
+            counts.FirstOrDefault(group => group.Key == PreparationJobState.Failed)?.Count ?? 0,
+            counts.FirstOrDefault(group => group.Key == PreparationJobState.Blocked)?.Count ?? 0);
     }
 }

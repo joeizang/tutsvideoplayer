@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using TutsVideoPlayer.Web.Features.Subtitles;
 using TutsVideoPlayer.Web.Models;
 
 namespace TutsVideoPlayer.IntegrationTests;
@@ -43,7 +44,21 @@ public class LibraryEndpointTests(TestApplication application)
         Assert.Equal(4, summary.CourseCount);
         Assert.Equal(8, summary.AvailableLessonCount);
         Assert.Equal(0, summary.MissingLessonCount);
-        Assert.Equal(6, summary.SubtitleTrackCount);
+        // The global subtitle count includes rows other tests may have marked missing;
+        // this milestone's contract is asserted through the course-local candidates.
+        var subsCourse = summary.CourseCount > 0
+            ? (await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses?pageSize=100", TestContext.Current.CancellationToken))!.Courses
+                .Single(course => course.Title == "CourseSubs")
+            : throw new Xunit.Sdk.XunitException("CourseSubs was not discovered.");
+        var subsTree = await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{subsCourse.Id}/tree", TestContext.Current.CancellationToken);
+        var videoLesson = subsTree!.Nodes.First(node => node.Type == "lesson");
+        var candidates = await client.GetFromJsonAsync<SubtitleCandidatesModel>(
+            $"/api/v1/lessons/{videoLesson.Id}/subtitle-candidates", TestContext.Current.CancellationToken);
+        // Other tests may have left sidecar files deleted (their tracks stay as
+        // Missing); the present candidates are what matters here.
+        Assert.Equal(4, candidates!.Candidates.Count(candidate => candidate.State != "Missing"));
+        Assert.Contains(candidates.Candidates, candidate => candidate.Reason == "adjacent file");
+
         Assert.True(summary.CatalogRevision > 0);
         Assert.NotNull(summary.LatestScan);
         Assert.Equal("Succeeded", summary.LatestScan.State);
@@ -73,6 +88,7 @@ public class LibraryEndpointTests(TestApplication application)
     public async Task CourseSearchMatchesCourseAndLessonNames()
     {
         var client = application.CreateClient();
+        await application.EnsureCatalogScannedAsync();
 
         var response = await client.GetStringAsync("/api/v1/courses?q=basics", TestContext.Current.CancellationToken);
         var model = JsonSerializer.Deserialize<CourseListModel>(response, JsonOptions());
@@ -87,6 +103,7 @@ public class LibraryEndpointTests(TestApplication application)
     public async Task CourseTreeReturnsNaturallyOrderedFlatNodes()
     {
         var client = application.CreateClient();
+        await application.EnsureCatalogScannedAsync();
         var courses = await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses", TestContext.Current.CancellationToken);
         var alpha = courses!.Courses.Single(course => course.Title == "CourseAlpha");
 
@@ -105,6 +122,7 @@ public class LibraryEndpointTests(TestApplication application)
     public async Task LessonDetailsIncludeNeighboursAndProbe()
     {
         var client = application.CreateClient();
+        await application.EnsureCatalogScannedAsync();
         var courses = await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses?pageSize=100", TestContext.Current.CancellationToken);
         var alpha = courses!.Courses.Single(course => course.Title == "CourseAlpha");
         var tree = await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{alpha.Id}/tree", TestContext.Current.CancellationToken);
@@ -124,6 +142,7 @@ public class LibraryEndpointTests(TestApplication application)
     public async Task UnknownCourseAndLessonReturnProblemDetails()
     {
         var client = application.CreateClient();
+        await application.EnsureCatalogScannedAsync();
 
         var course = await client.GetAsync("/api/v1/courses/99999/tree", TestContext.Current.CancellationToken);
         var lesson = await client.GetAsync("/api/v1/lessons/99999", TestContext.Current.CancellationToken);

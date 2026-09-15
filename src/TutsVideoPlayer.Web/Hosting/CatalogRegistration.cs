@@ -4,14 +4,19 @@ using TutsVideoPlayer.Infrastructure.FileSystem;
 using TutsVideoPlayer.Infrastructure.Media;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Library;
+using TutsVideoPlayer.Web.Features.Preparation;
 using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Features.Subtitles;
 namespace TutsVideoPlayer.Web.Hosting;
 
 public static class CatalogRegistration
 {
-    public static IServiceCollection AddCatalog(this IServiceCollection services, AppOptions options)
+    public static IServiceCollection AddCatalog(this IServiceCollection services, AppOptions options, PreparationOptions preparationOptions)
     {
+        services.AddSingleton(preparationOptions);
+        services.AddSingleton(new FFmpegAdapter(preparationOptions.FFmpegPath));
+        services.AddScoped<PreparedOutputValidator>();
+        services.AddSingleton<InstallationLockHolder>();
         var databasePath = ResolvePath(options.DataDirectory, "tutsvideoplayer.db");
         var dataDirectory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(dataDirectory))
@@ -31,6 +36,7 @@ public static class CatalogRegistration
         services.AddSingleton<ScanCoordinator>();
         services.AddHostedService<StartupScanService>();
         services.AddHostedService<StartupMigrationCheck>();
+        services.AddHostedService<PreparationWorker>();
 
         return services;
     }

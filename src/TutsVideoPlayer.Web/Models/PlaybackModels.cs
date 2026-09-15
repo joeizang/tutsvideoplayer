@@ -17,7 +17,10 @@ public sealed record RenditionModel(
     [property: JsonPropertyName("codecHint")] string? CodecHint,
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("retentionClass")] string RetentionClass,
-    [property: JsonPropertyName("mediaUrl")] string? MediaUrl);
+    [property: JsonPropertyName("mediaUrl")] string? MediaUrl,
+    [property: JsonPropertyName("preparationJobId")] string? PreparationJobId = null,
+    [property: JsonPropertyName("progress")] double? Progress = null,
+    [property: JsonPropertyName("userMessage")] string? UserMessage = null);
 
 public sealed record PlaybackPreferencesModel(
     [property: JsonPropertyName("speed")] double Speed,
@@ -115,6 +118,33 @@ public sealed record SettingsModel(
     [property: JsonPropertyName("fitMode")] string FitMode,
     [property: JsonPropertyName("subtitleEnabled")] bool SubtitleEnabled,
     [property: JsonPropertyName("revision")] int Revision);
+
+public sealed record QueueSummaryModel(
+    [property: JsonPropertyName("paused")] bool Paused,
+    [property: JsonPropertyName("revision")] int Revision,
+    [property: JsonPropertyName("running")] int Running,
+    [property: JsonPropertyName("queued")] int Queued,
+    [property: JsonPropertyName("failed")] int Failed,
+    [property: JsonPropertyName("blocked")] int Blocked);
+
+public sealed record PreparationRequestModel(
+    [property: JsonPropertyName("purpose")] string? Purpose);
+
+public sealed record PreparationJobModel(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("lessonId")] string LessonId,
+    [property: JsonPropertyName("lessonTitle")] string LessonTitle,
+    [property: JsonPropertyName("purpose")] string Purpose,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("progress")] double? Progress,
+    [property: JsonPropertyName("attempt")] int Attempt,
+    [property: JsonPropertyName("errorCode")] string? ErrorCode,
+    [property: JsonPropertyName("userMessage")] string? UserMessage,
+    [property: JsonPropertyName("priority")] int Priority,
+    [property: JsonPropertyName("enqueuedUtcMs")] long EnqueuedUtcMs);
+
+public sealed record QueuePauseModel(
+    [property: JsonPropertyName("paused")] bool Paused);
 
 public sealed record SettingsUpdateModel(
     [property: JsonPropertyName("playbackSpeed")] double? PlaybackSpeed,

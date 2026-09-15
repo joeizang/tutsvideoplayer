@@ -32,6 +32,22 @@ public static class MediaFileClassification
     public static bool IsReservedDirectory(string name) =>
         name.Equals(ReservedAppDirectory, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// App-owned permanent playback copies and their provenance manifests. They
+    /// are never lessons and never unsupported files; the scanner skips them so
+    /// a converted copy cannot become a second lesson.
+    /// </summary>
+    public static bool IsManagedOutputName(string fileName)
+    {
+        if (fileName.EndsWith(".tvp.json", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        return stem.Contains(".tvp-", StringComparison.Ordinal);
+    }
+
     public static bool IsIgnoredName(string name)
     {
         if (name.StartsWith('.'))
