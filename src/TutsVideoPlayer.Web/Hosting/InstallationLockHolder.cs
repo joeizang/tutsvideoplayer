@@ -16,7 +16,18 @@ public sealed class InstallationLockHolder(IOptions<AppOptions> options) : IHost
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _lock = InstallationLock.Acquire(_appDataDirectory);
+        try
+        {
+            _lock = InstallationLock.Acquire(_appDataDirectory);
+        }
+        catch (IOException exception)
+        {
+            throw new InvalidOperationException(
+                $"Another TutsVideoPlayer process already owns the application data directory '{_appDataDirectory}'. "
+                + "Only one host may run against the same data; stop the other process or point this one at a different App:DataDirectory.",
+                exception);
+        }
+
         return Task.CompletedTask;
     }
 

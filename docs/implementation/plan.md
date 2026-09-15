@@ -116,6 +116,8 @@ Exit evidence: correct WMV and split-stream playback; original byte preservation
 
 Recorded results: the full real-library queue ran to completion — 94/94 jobs Succeeded (60 WMVs encoded to H.264/AAC at native sizes such as 1024×768; 34 split TS/AAC lessons mapped with stream copy). ffprobe of a prepared TS output shows both h264 video and aac audio with duration within 3 ms of the 217 s source; a prepared WMV plays in the browser at its native 1024×768 through `/media/renditions/{id}` with byte-range seeking. Source TS, AAC, and WMV files are byte-identical after preparation (SHA-256), permanent copies carry Committed manifests beside their originals, and a rescan after 94 conversions kept 34 lessons in the TS course with no duplicate jobs or lessons. Integration tests cover scheduling exemptions, queue-pause 428/If-Match semantics, dedup convergence, and the manifest/publication protocol. Managed outputs (`.tvp-*.mp4` and `.tvp.json`) are excluded from discovery so a converted copy never becomes a second lesson.
 
+Post-review corrections: see [M4 review responses](../m4-review-responses.md) for recovery, provenance, scheduling, configuration, progress, and UI fixes. Validation uses isolated fixtures; the original whole-library run above was not repeated.
+
 ## M5: Quality preparation and safe cache management
 
 Dependencies: M4.

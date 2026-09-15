@@ -5,7 +5,6 @@ using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Catalog;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
-using Microsoft.AspNetCore.Mvc;
 using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Hosting;
@@ -60,8 +59,7 @@ public sealed class LessonPreparationsController(AppDbContext context) : Control
             Priority = 5,
             EnqueuedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };
-        context.PreparationJobs.Add(job);
-        await context.SaveChangesAsync(cancellationToken);
+        job = await PreparationJobStore.GetOrCreateAsync(context, job, cancellationToken);
 
         return Accepted(ToModel(job, lesson.Title));
     }
@@ -137,6 +135,8 @@ public sealed class PreparationsController(AppDbContext context) : ControllerBas
         }
 
         job.State = PreparationJobState.Queued;
+        job.Attempt = 0;
+        job.Progress = null;
         job.ErrorCode = null;
         job.UserMessage = null;
         job.LeaseOwner = null;
@@ -187,18 +187,25 @@ public sealed class PreparationsController(AppDbContext context) : ControllerBas
 
         if (!precondition.Present)
         {
+            RevisionResponses.SetETag(Response, preferences.Revision);
             return StatusCode(StatusCodes.Status428PreconditionRequired, RevisionResponses.PreconditionRequired(preferences.Revision, "queue pause"));
         }
 
         if (!precondition.Valid || precondition.Revision != preferences.Revision)
         {
             RevisionResponses.SetETag(Response, preferences.Revision);
-            return StatusCode(StatusCodes.Status409Conflict, RevisionResponses.Concurrent("queue pause"));
+            return StatusCode(StatusCodes.Status412PreconditionFailed, RevisionResponses.Concurrent("queue pause"));
         }
 
         preferences.QueuePaused = request.Paused;
         preferences.Revision++;
-        await context.SaveChangesAsync(cancellationToken);
+        try { await context.SaveChangesAsync(cancellationToken); }
+        catch (DbUpdateConcurrencyException)
+        {
+            await context.Entry(preferences).ReloadAsync(cancellationToken);
+            RevisionResponses.SetETag(Response, preferences.Revision);
+            return StatusCode(StatusCodes.Status412PreconditionFailed, RevisionResponses.Concurrent("queue pause"));
+        }
 
         RevisionResponses.SetETag(Response, preferences.Revision);
         return Ok(new { paused = preferences.QueuePaused, revision = preferences.Revision });

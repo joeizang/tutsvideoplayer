@@ -65,6 +65,11 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                         <p role="alert" className="mb-4 rounded-lg border border-danger/30 bg-surface p-4 text-danger dark:bg-neutral-800">
                             The source file is unavailable. <a href="/" className="underline">Refresh library</a> to look for it again.
                         </p>
+                    ) : !playable && preparingJob && !preparing ? (
+                        <div role="alert" className="rounded-lg bg-black p-6 text-neutral-300">
+                            <p>{preparingJob.userMessage ?? `Preparation is ${preparingJob.state.toLowerCase()}.`}</p>
+                            <a href="/" className="text-action">Open the queue to retry or inspect this job</a>
+                        </div>
                     ) : preparing ? (
                         <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-lg bg-black text-center text-sm text-neutral-300">
                             <span>{preparingLabel}</span>
@@ -83,7 +88,7 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                         />
                     ) : (
                         <div className="flex aspect-video w-full items-center justify-center rounded-lg bg-black p-6 text-center text-sm text-neutral-400">
-                            This lesson has no ready playable rendition yet. Compatibility preparation arrives in milestone 4.
+                            This lesson has no ready playable rendition. Refresh the library or inspect its preparation in the library queue.
                         </div>
                     )}
 

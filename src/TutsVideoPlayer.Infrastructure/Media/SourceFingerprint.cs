@@ -21,7 +21,7 @@ public static class SourceFingerprint
         foreach (var component in components.OrderBy(entry => entry.Role, StringComparer.Ordinal)
                      .ThenBy(entry => entry.RelativePath, StringComparer.Ordinal))
         {
-            sha.AppendData(Encoding.ASCII.GetBytes($"{component.Role}|{component.RelativePath}|"));
+            sha.AppendData(Encoding.UTF8.GetBytes($"{component.Role}|{component.RelativePath}|"));
 
             using var stream = File.OpenRead(component.AbsolutePath);
             var buffer = new byte[1024 * 1024];

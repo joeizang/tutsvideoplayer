@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using TutsVideoPlayer.Infrastructure.Catalog;
 using TutsVideoPlayer.Infrastructure.FileSystem;
 using TutsVideoPlayer.Infrastructure.Media;
@@ -13,10 +14,16 @@ public static class CatalogRegistration
 {
     public static IServiceCollection AddCatalog(this IServiceCollection services, AppOptions options, PreparationOptions preparationOptions)
     {
-        services.AddSingleton(preparationOptions);
+        // The worker and executor consume IOptions<PreparationOptions>; registering only the
+        // concrete instance left them with silent defaults (e.g. the configured disk reserve
+        // was never enforced).
+        services.AddSingleton(Options.Create(preparationOptions));
         services.AddSingleton(new FFmpegAdapter(preparationOptions.FFmpegPath));
         services.AddScoped<PreparedOutputValidator>();
-        services.AddSingleton<InstallationLockHolder>();
+        // Registered as a hosted service so the lock is actually acquired, and registered
+        // before the scanner and worker so single-process ownership is established before
+        // any recovery or scheduling runs. Hosted services start in registration order.
+        services.AddHostedService<InstallationLockHolder>();
         var databasePath = ResolvePath(options.DataDirectory, "tutsvideoplayer.db");
         var dataDirectory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(dataDirectory))
@@ -34,8 +41,8 @@ public static class CatalogRegistration
         services.AddScoped<LearningService>();
         services.AddScoped<SubtitleService>();
         services.AddSingleton<ScanCoordinator>();
-        services.AddHostedService<StartupScanService>();
         services.AddHostedService<StartupMigrationCheck>();
+        services.AddHostedService<StartupScanService>();
         services.AddHostedService<PreparationWorker>();
 
         return services;

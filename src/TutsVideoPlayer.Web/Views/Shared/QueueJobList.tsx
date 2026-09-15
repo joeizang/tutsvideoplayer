@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import type { ViewProps } from "dotnet:rendering";
 import type { PreparationJobModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
 import { REQUEST_HEADERS } from "./request-headers.ts";
 
@@ -14,9 +13,9 @@ export function QueueJobList({ initialJobs, initialPaused }: { initialJobs: Prep
         void (async () => {
             try {
                 const response = await fetch("/api/v1/preparations?limit=50");
-                if (response.ok) {
-                    setJobs(await response.json());
-                }
+                if (response.ok) setJobs(await response.json());
+                const queue = await fetch("/api/v1/preparations/queue");
+                if (queue.ok) setPaused((await queue.json()).paused);
             } catch {
                 return;
             }
@@ -24,36 +23,36 @@ export function QueueJobList({ initialJobs, initialPaused }: { initialJobs: Prep
     }, [initialJobs]);
     const [paused, setPaused] = useState(initialPaused);
     const [busy, setBusy] = useState(false);
-    const active = jobs.some((job) => job.state === "Running" || job.state === "Queued" || job.state === "Validating" || job.state === "Publishing");
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!active && !busy) {
-            return;
-        }
-
         const timer = window.setInterval(async () => {
             try {
                 const response = await fetch("/api/v1/preparations?limit=50");
-                if (response.ok) {
-                    setJobs(await response.json());
-                }
+                if (response.ok) setJobs(await response.json());
+                const queue = await fetch("/api/v1/preparations/queue");
+                if (queue.ok) setPaused((await queue.json()).paused);
             } catch {
                 return;
             }
         }, 2000);
 
         return () => window.clearInterval(timer);
-    }, [active, busy]);
+    }, []);
 
     const act = async (path: string, method: string, after: () => void) => {
         setBusy(true);
+        setError(null);
         try {
-            await fetch(path, { method, headers: REQUEST_HEADERS });
+            const action = await fetch(path, { method, headers: REQUEST_HEADERS });
+            if (!action.ok) { setError("The job changed or the action failed. Refresh the queue and try again."); return; }
             after();
             const response = await fetch("/api/v1/preparations?limit=50");
             if (response.ok) {
                 setJobs(await response.json());
             }
+        } catch {
+            setError("The queue could not be reached. Try again.");
         } finally {
             setBusy(false);
         }
@@ -62,12 +61,14 @@ export function QueueJobList({ initialJobs, initialPaused }: { initialJobs: Prep
     const togglePause = async () => {
         try {
             const current = await (await fetch("/api/v1/preparations/queue")).json();
-            await fetch("/api/v1/preparations/queue", {
+            const changed = await fetch("/api/v1/preparations/queue", {
                 method: "PUT",
                 headers: { ...REQUEST_HEADERS, "Content-Type": "application/json", "If-Match": `"${current.revision}"` },
-                body: JSON.stringify({ paused: !paused })
+                body: JSON.stringify({ paused: !current.paused })
             });
-            setPaused(!paused);
+            if (!changed.ok) { setError("Queue settings changed. Try again."); return; }
+            setError(null);
+            setPaused((await changed.json()).paused);
             const response = await fetch("/api/v1/preparations?limit=50");
             if (response.ok) {
                 setJobs(await response.json());
@@ -90,6 +91,7 @@ export function QueueJobList({ initialJobs, initialPaused }: { initialJobs: Prep
                 </button>
             </div>
 
+            {error ? <p role="alert" className="text-danger">{error}</p> : null}
             {paused ? (
                 <p className="mt-0 text-sm text-ink-soft dark:text-neutral-400">
                     Preparation is paused. Any encode already running will finish; no new jobs start until you resume.

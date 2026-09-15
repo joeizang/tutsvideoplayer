@@ -1,4 +1,5 @@
 using System.Globalization;
+using TutsVideoPlayer.Infrastructure.FileSystem;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using TutsVideoPlayer.Core.Catalog;
@@ -25,6 +26,7 @@ public static class PreparationScheduler
     public static async Task ScheduleCompatibilityJobsAsync(
         AppDbContext context,
         long libraryId,
+        string root,
         ILogger logger,
         CancellationToken cancellationToken = default)
     {
@@ -43,6 +45,21 @@ public static class PreparationScheduler
                 && rendition.Purpose == RenditionPurpose.Compatibility
                 && rendition.RetentionClass == RenditionRetention.Permanent)
             .ToListAsync(cancellationToken);
+        foreach (var rendition in permanentRenditions.Where(r => r.Status == RenditionStatus.Ready))
+        {
+            if (PreparationArtifacts.IsOwnedOutput(root, rendition.RelativePath)) continue;
+            rendition.Status = RenditionStatus.Stale;
+            rendition.Revision++;
+            var job = jobs.FirstOrDefault(j => j.LessonId == rendition.LessonId && j.SourceGeneration == rendition.SourceGeneration && j.State == PreparationJobState.Succeeded);
+            if (job is not null)
+            {
+                job.State = PreparationJobState.Queued;
+                job.Attempt = 0;
+                job.Progress = null;
+                job.Revision++;
+            }
+        }
+        await context.SaveChangesAsync(cancellationToken);
         var validRenditionsByLesson = permanentRenditions
             .Where(rendition => rendition.Status == RenditionStatus.Ready)
             .GroupBy(rendition => (rendition.LessonId, rendition.SourceGeneration))
@@ -71,7 +88,7 @@ public static class PreparationScheduler
             }
 
             var extension = Path.GetExtension(video.RelativePath).ToLowerInvariant();
-            if (extension is ".mp4" or ".m4v" or ".mkv" or ".webm")
+            if (extension is ".mp4" or ".mkv")
             {
                 continue;
             }
@@ -90,15 +107,12 @@ public static class PreparationScheduler
                     message = "This MPEG-TS lesson has no companion audio file yet; preparation is blocked until it appears.";
                 }
             }
-            else if (extension is not ".wmv" and not ".ts" and not ".mts" and not ".m2ts")
+            if (!blocked && PreparationRecipes.Choose(new SourceSetInfo(video.RelativePath, video.RelativePath,
+                    companion?.RelativePath, companion?.RelativePath, LibraryScanner.ParseProbeMetadata(video.ProbeMetadata)), out _) is null)
             {
-                var probe = LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
-                if (probe?.VideoCodec != "h264")
-                {
-                    blocked = true;
-                    errorCode = UnsupportedSourceCode;
-                    message = "This source format has no supported preparation recipe in this version.";
-                }
+                blocked = true;
+                errorCode = UnsupportedSourceCode;
+                message = "This source format has no supported preparation recipe in this version.";
             }
 
             var job = new PreparationJobEntity
@@ -114,13 +128,12 @@ public static class PreparationScheduler
                 ErrorCode = errorCode,
                 UserMessage = message
             };
-            context.PreparationJobs.Add(job);
-            jobsByLessonGeneration[key] = job;
+            jobsByLessonGeneration[key] = await PreparationJobStore.GetOrCreateAsync(context, job, cancellationToken);
             created++;
         }
 
         foreach (var job in jobs.Where(job => job.State == PreparationJobState.Blocked
-                     && job.ErrorCode == MissingCompanionCode))
+                     && (job.ErrorCode == MissingCompanionCode || job.ErrorCode == UnsupportedSourceCode)))
         {
             var companion = lessons
                 .Where(lesson => lesson.Id == job.LessonId && lesson.SourceGeneration == job.SourceGeneration)
@@ -128,7 +141,12 @@ public static class PreparationScheduler
                 .Any(component => component.Generation == job.SourceGeneration
                     && component.Role == SourceComponentRole.CompanionAudio);
 
-            if (companion)
+            var lesson = lessons.FirstOrDefault(l => l.Id == job.LessonId && l.SourceGeneration == job.SourceGeneration);
+            var video = lesson?.SourceComponents.FirstOrDefault(c => c.Generation == job.SourceGeneration && c.Role == SourceComponentRole.Video);
+            var audio = lesson?.SourceComponents.FirstOrDefault(c => c.Generation == job.SourceGeneration && c.Role == SourceComponentRole.CompanionAudio);
+            var repairedProbe = video is not null && PreparationRecipes.Choose(new SourceSetInfo(video.RelativePath, video.RelativePath,
+                audio?.RelativePath, audio?.RelativePath, LibraryScanner.ParseProbeMetadata(video.ProbeMetadata)), out _) is not null;
+            if (job.ErrorCode == MissingCompanionCode ? companion : repairedProbe)
             {
                 job.State = PreparationJobState.Queued;
                 job.ErrorCode = null;

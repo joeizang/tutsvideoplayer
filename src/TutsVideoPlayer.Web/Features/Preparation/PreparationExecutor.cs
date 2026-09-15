@@ -34,17 +34,10 @@ public sealed class PreparationExecutor(
 {
     private const int MaxAutomaticAttempts = 3;
 
-    public static string DedupKeyFor(long lessonId, int sourceGeneration) =>
-        $"{lessonId.ToString(CultureInfo.InvariantCulture)}:{sourceGeneration.ToString(CultureInfo.InvariantCulture)}:compatibility:{PreparationRecipes.WmvVersion}/{PreparationRecipes.TsAacVersion}/{PreparationRecipes.RemuxVersion}";
-
     public static string OutputFileNameFor(string primaryRelativePath, string fingerprint) =>
         $"{Path.GetFileNameWithoutExtension(primaryRelativePath)}.tvp-{fingerprint[..12]}.mp4";
 
     public static string ManifestFileNameFor(string outputFileName) => $"{outputFileName}.tvp.json";
-
-    public bool IsManagedOutputName(string name) =>
-        name.EndsWith(".tvp.json", StringComparison.OrdinalIgnoreCase)
-        || (name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) && name.Contains(".tvp-", StringComparison.Ordinal));
 
     public async Task<PreparationOutcome> ExecuteAsync(long jobId, CancellationToken cancellationToken)
     {
@@ -81,20 +74,23 @@ public sealed class PreparationExecutor(
                 return await BlockAsync(job, attempt, "companion-unavailable", "The companion audio file is currently unavailable.", cancellationToken);
             }
 
-            var probe = LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
+            if (job.Lesson.SourceGeneration != job.SourceGeneration)
+            {
+                return await FailAsync(job, attempt, "source-changed", "The source generation changed; use the current lesson's preparation.", true, cancellationToken);
+            }
+            var inspected = await probeAdapter.ProbeAsync(videoFullPath, cancellationToken);
+            var probe = inspected.Success
+                ? new ProbeMetadata(inspected.DurationMs, inspected.VideoCodec, inspected.AudioCodec, inspected.Width, inspected.Height)
+                : LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
             var sourceSet = new SourceSetInfo(video.RelativePath, videoFullPath, companion?.RelativePath, companionFullPath, probe);
             var recipe = PreparationRecipes.Choose(sourceSet, out var blockedReason);
             if (recipe is null)
             {
-                return await FailAsync(
-                    job,
-                    attempt,
-                    blockedReason ?? "unsupported-source",
-                    "The source format has no supported preparation recipe in this version.",
-                    permanent: true,
-                    cancellationToken);
+                return await BlockAsync(job, attempt, "unsupported-source",
+                    "The source format has no supported preparation recipe in this version.", cancellationToken);
             }
 
+            job.RecipeVersion = recipe.RecipeVersion;
             var fingerprint = SourceFingerprint.Compute(
             [
                 ("video", video.RelativePath, videoFullPath),
@@ -129,20 +125,41 @@ public sealed class PreparationExecutor(
             job.OutputRelativePath = RelativeToLibraryRoot(outputFullPath);
             job.ManifestRelativePath = RelativeToLibraryRoot(manifestFullPath);
 
+            if (File.Exists(temporaryFullPath))
+            {
+                return await BlockAsync(job, attempt, "temporary-file-exists", "A preparation temporary file already exists. Restart to recover it safely.", cancellationToken);
+            }
+            if (File.Exists(manifestFullPath))
+            {
+                var previous = PreparationManifest.TryRead(manifestFullPath);
+                if (previous is null || previous.JobId != job.Id || previous.Sources.Count == 0 || previous.Sources[0].Fingerprint != fingerprint)
+                    return await BlockAsync(job, attempt, "unverified-manifest", "An unrelated sidecar occupies the output path. It has been preserved.", cancellationToken);
+            }
+            attempt.TempRelativePath = RelativeToLibraryRoot(temporaryFullPath);
+            await context.SaveChangesAsync(cancellationToken);
+            // Reserve a new temporary name; FFmpeg may overwrite only this owned empty file.
+            using (new FileStream(temporaryFullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
             var arguments = recipe.Arguments
                 .Select(argument => argument == "{output}" ? temporaryFullPath : argument)
                 .ToList();
 
             var sourceDuration = probe?.DurationMs;
-            await context.SaveChangesAsync(cancellationToken);
-
+            var lastProgressSave = Stopwatch.StartNew();
             var result = await ffmpegAdapter.RunAsync(
                 arguments,
-                seconds =>
+                async seconds =>
                 {
+                    if (lastProgressSave.Elapsed >= TimeSpan.FromSeconds(2) && !CheckDiskReserve(outputDirectory, out var reserveMessage))
+                        throw new IOException(reserveMessage);
                     if (sourceDuration is > 0)
                     {
                         job.Progress = Math.Clamp(seconds * 1000.0 / sourceDuration.Value, 0, 1);
+                        if (lastProgressSave.Elapsed >= TimeSpan.FromSeconds(2))
+                        {
+                            job.LeaseExpiresUtcMs = DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeMilliseconds();
+                            await context.SaveChangesAsync(cancellationToken);
+                            lastProgressSave.Restart();
+                        }
                     }
                 },
                 cancellationToken);
@@ -151,6 +168,9 @@ public sealed class PreparationExecutor(
             if (!result.Success)
             {
                 File.Delete(temporaryFullPath);
+                if (result.Error?.Contains("No space left", StringComparison.OrdinalIgnoreCase) == true
+                    || result.Error?.Contains("Permission denied", StringComparison.OrdinalIgnoreCase) == true)
+                    return await BlockAsync(job, attempt, "output-unavailable", "The output volume is full or not writable. Check storage and retry.", cancellationToken);
                 var transient = IsTransient(result.Error);
                 return await FailAsync(job, attempt, "encode-failed", result.Error ?? "The encode failed.", permanent: !transient, cancellationToken);
             }
@@ -163,6 +183,16 @@ public sealed class PreparationExecutor(
                 return await FailAsync(job, attempt, "invalid-output", validation.Error ?? "The prepared output failed validation.", permanent: false, cancellationToken);
             }
 
+            var currentFingerprint = SourceFingerprint.Compute(
+                [("video", video.RelativePath, videoFullPath),
+                 .. companion is not null && companionFullPath is not null
+                    ? new[] { ("companion-audio", companion.RelativePath, companionFullPath) }
+                    : Array.Empty<(string, string, string)>()]);
+            if (currentFingerprint != fingerprint)
+            {
+                File.Delete(temporaryFullPath);
+                return await FailAsync(job, attempt, "source-changed", "Source files changed during preparation. Refresh the library.", true, cancellationToken);
+            }
             await TransitionAsync(job, PreparationJobState.Publishing, cancellationToken);
 
             var manifest = new PreparationManifest
@@ -171,7 +201,9 @@ public sealed class PreparationExecutor(
                 LessonId = job.LessonId,
                 SourceGeneration = job.SourceGeneration,
                 RecipeVersion = recipe.RecipeVersion,
-                Sources = [new ManifestSource("video", video.RelativePath, fingerprint)],
+                LibraryLogicalIdentity = await context.Lessons.Where(l => l.Id == job.LessonId).Select(l => l.Course.LibraryId).Join(context.Libraries, id => id, l => l.Id, (id, l) => l.LogicalIdentity).SingleAsync(cancellationToken),
+                Sources = [new ManifestSource("video", video.RelativePath, fingerprint),
+                    .. companion is not null ? new[] { new ManifestSource("companion-audio", companion.RelativePath, fingerprint) } : Array.Empty<ManifestSource>()],
                 OutputFileName = outputFileName,
                 OutputHash = validation.OutputHash,
                 OutputLengthBytes = validation.ByteLength,
@@ -211,6 +243,8 @@ public sealed class PreparationExecutor(
             {
                 await TransitionAsync(job, PreparationJobState.Interrupted, CancellationToken.None);
                 await CompleteAttemptAsync(attempt, null, $"Unexpected failure: {exception.GetType().Name}.", null, CancellationToken.None);
+                if (attempt.TempRelativePath is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, attempt.TempRelativePath, out var interruptedTemp))
+                    File.Delete(interruptedTemp);
                 if (job.Attempt < MaxAutomaticAttempts)
                 {
                     await TransitionAsync(job, PreparationJobState.Queued, CancellationToken.None);
@@ -244,71 +278,84 @@ public sealed class PreparationExecutor(
 
         foreach (var job in staleJobs)
         {
-            var video = job.Lesson.SourceComponents.FirstOrDefault(component =>
-                component.Generation == job.SourceGeneration && component.Role == SourceComponentRole.Video);
-            if (video is null)
+            try
             {
-                await RequeueAsync(job, cancellationToken);
-                continue;
-            }
-
-            if (!LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, video.RelativePath, out var videoFullPath))
-            {
-                await RequeueAsync(job, cancellationToken);
-                continue;
-            }
-
-            var outputDirectory = Path.GetDirectoryName(videoFullPath)!;
-            var manifestPath = job.ManifestRelativePath is null
-                ? null
-                : Path.Combine(appOptions.Value.LibraryRoot, job.ManifestRelativePath);
-            var outputPath = job.OutputRelativePath is null
-                ? null
-                : Path.Combine(appOptions.Value.LibraryRoot, job.OutputRelativePath);
-            var temporary = Directory.EnumerateFiles(outputDirectory, $".*.tvp-*.mp4.{job.Id.ToString(CultureInfo.InvariantCulture)}.part")
-                .FirstOrDefault();
-
-            var manifest = manifestPath is not null ? PreparationManifest.TryRead(manifestPath) : null;
-
-            if (outputPath is not null && File.Exists(outputPath) && manifest?.State == "Committed")
-            {
-                // A completed publication whose database row never landed: adopt it.
-                var validation = await validator.ValidateAsync(
-                    outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken);
-                if (validation.Success)
+                if (context.Entry(job).State == EntityState.Detached) context.Attach(job);
+                var video = job.Lesson.SourceComponents.FirstOrDefault(component =>
+                    component.Generation == job.SourceGeneration && component.Role == SourceComponentRole.Video);
+                if (video is null)
                 {
-                    await PublishAsync(job, null, outputPath, manifestPath!, manifest.OutputFileName, validation, cancellationToken);
-                    await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
-                    await context.SaveChangesAsync(cancellationToken);
-                    logger.LogInformation("Recovered committed output for job {JobId}.", job.Id);
+                    await RequeueAsync(job, cancellationToken);
                     continue;
                 }
-            }
 
-            if (manifest?.State == "Prepared" && outputPath is not null && File.Exists(outputPath))
-            {
-                // Prepared manifest with the final file present: finish publication.
-                var validation = await validator.ValidateAsync(
-                    outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken);
-                if (validation.Success)
+                if (!LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, video.RelativePath, out var videoFullPath))
                 {
-                    manifest = manifest with { State = "Committed" };
-                    manifest.WriteAtomically(manifestPath!);
-                    await PublishAsync(job, null, outputPath, manifestPath!, manifest.OutputFileName, validation, cancellationToken);
-                    await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
-                    await context.SaveChangesAsync(cancellationToken);
-                    logger.LogInformation("Recovered prepared output for job {JobId}.", job.Id);
+                    await RequeueAsync(job, cancellationToken);
                     continue;
                 }
-            }
 
-            if (temporary is not null)
+                var outputDirectory = Path.GetDirectoryName(videoFullPath)!;
+                var manifestPath = job.ManifestRelativePath is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, job.ManifestRelativePath, out var safeManifest) ? safeManifest : null;
+                var outputPath = job.OutputRelativePath is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, job.OutputRelativePath, out var safeOutput) ? safeOutput : null;
+                var recordedTemporary = await context.PreparationAttempts.Where(a => a.JobId == job.Id && a.TempRelativePath != null)
+                    .OrderByDescending(a => a.Id).Select(a => a.TempRelativePath).FirstOrDefaultAsync(cancellationToken);
+                var temporary = recordedTemporary is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, recordedTemporary, out var safeTemporary)
+                    && Path.GetDirectoryName(safeTemporary) == outputDirectory
+                    && Path.GetFileName(safeTemporary).EndsWith($".mp4.{job.Id.ToString(CultureInfo.InvariantCulture)}.part", StringComparison.Ordinal)
+                        ? safeTemporary : null;
+
+                var manifest = manifestPath is not null ? PreparationManifest.TryRead(manifestPath) : null;
+
+                if (outputPath is not null)
+                {
+                    var components = new List<(string Role, string RelativePath, string AbsolutePath)> { ("video", video.RelativePath, videoFullPath) };
+                    foreach (var component in job.Lesson.SourceComponents.Where(c => c.Generation == job.SourceGeneration && c.Role == SourceComponentRole.CompanionAudio))
+                    {
+                        if (!LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, component.RelativePath, out var audio))
+                            throw new IOException("Companion source is unavailable during recovery.");
+                        components.Add(("companion-audio", component.RelativePath, audio));
+                    }
+                    var fingerprint = SourceFingerprint.Compute(components);
+                    if (manifest is not null && manifestPath is not null
+                        && job.SourceGeneration == job.Lesson.SourceGeneration
+                        && manifest.LessonId == job.LessonId && manifest.SourceGeneration == job.SourceGeneration
+                        && manifest.RecipeVersion == job.RecipeVersion
+                        && manifest.Sources.Count > 0 && manifest.Sources[0].Fingerprint == fingerprint
+                        && PreparationArtifacts.IsVerifiedOutput(outputPath, manifest))
+                    {
+                        var validation = await validator.ValidateAsync(outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken);
+                        if (validation.Success)
+                        {
+                            (manifest with { State = "Committed" }).WriteAtomically(manifestPath);
+                            await PublishAsync(job, null, outputPath, manifestPath, manifest.OutputFileName, validation, cancellationToken);
+                            if (job.State is PreparationJobState.Running or PreparationJobState.Validating)
+                                await TransitionAsync(job, PreparationJobState.Interrupted, cancellationToken);
+                            await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
+                            continue;
+                        }
+                    }
+                    job.ErrorCode = "unverified-output";
+                    job.UserMessage = "Existing output could not be verified. Its file and manifest have been preserved.";
+                    if (job.State is not PreparationJobState.Interrupted)
+                        await TransitionAsync(job, PreparationJobState.Interrupted, cancellationToken);
+                    await TransitionAsync(job, PreparationJobState.Failed, cancellationToken);
+                    continue;
+                }
+
+                if (temporary is not null)
+                {
+                    // A partial encode is never a rendition; drop it and requeue.
+                    File.Delete(temporary);
+                }
+
+                await RequeueAsync(job, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                // A partial encode is never a rendition; drop it and requeue.
-                File.Delete(temporary);
+                logger.LogError(exception, "Could not recover preparation {JobId}; continuing with remaining jobs.", job.Id);
+                context.ChangeTracker.Clear();
             }
-
-            await RequeueAsync(job, cancellationToken);
         }
     }
 
@@ -368,6 +415,17 @@ public sealed class PreparationExecutor(
         }
 
         job.State = target;
+        if (target is PreparationJobState.Succeeded or PreparationJobState.Failed or PreparationJobState.Blocked or PreparationJobState.Interrupted)
+        {
+            job.LeaseOwner = null;
+            job.LeaseExpiresUtcMs = null;
+        }
+        if (target == PreparationJobState.Succeeded)
+        {
+            job.Progress = 1;
+            job.ErrorCode = null;
+            job.UserMessage = null;
+        }
         if (target == PreparationJobState.Running)
         {
             job.LeaseOwner = Environment.MachineName + ":" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
@@ -402,7 +460,8 @@ public sealed class PreparationExecutor(
         attempt.FinishedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         attempt.ExitCode = exitCode;
         attempt.SanitizedFailure = failure;
-        attempt.TempRelativePath = tempRelativePath;
+        if (tempRelativePath is not null)
+            attempt.TempRelativePath = Path.IsPathRooted(tempRelativePath) ? RelativeToLibraryRoot(tempRelativePath) : tempRelativePath;
         await context.SaveChangesAsync(cancellationToken);
     }
 
@@ -432,7 +491,7 @@ public sealed class PreparationExecutor(
         if (!permanent && job.Attempt < MaxAutomaticAttempts)
         {
             await CompleteAttemptAsync(attempt, null, message, null, cancellationToken);
-            await TransitionAsync(job, PreparationJobState.Queued, cancellationToken);
+            await RequeueAsync(job, cancellationToken);
             job.ErrorCode = code;
             job.UserMessage = message;
             await context.SaveChangesAsync(cancellationToken);
@@ -449,10 +508,15 @@ public sealed class PreparationExecutor(
 
     private async Task RequeueAsync(PreparationJobEntity job, CancellationToken cancellationToken)
     {
+        if (job.State is PreparationJobState.Running or PreparationJobState.Validating or PreparationJobState.Publishing)
+        {
+            await TransitionAsync(job, PreparationJobState.Interrupted, cancellationToken);
+        }
         if (job.State != PreparationJobState.Queued)
         {
-            await TransitionAsync(job, PreparationJobState.Queued, cancellationToken);
+            await TransitionAsync(job, job.Attempt >= MaxAutomaticAttempts ? PreparationJobState.Failed : PreparationJobState.Queued, cancellationToken);
         }
+        job.Progress = null;
 
         job.LeaseOwner = null;
         job.LeaseExpiresUtcMs = null;
@@ -471,20 +535,17 @@ public sealed class PreparationExecutor(
         CancellationToken cancellationToken)
     {
         var manifest = PreparationManifest.TryRead(manifestFullPath);
-        var validation = await validator.ValidateAsync(outputFullPath, sourceDurationMs, manifest?.VideoCodec, manifest?.AudioCodec, cancellationToken);
+        var provenanceMatches = manifest is not null
+            && manifest.LessonId == job.LessonId && manifest.SourceGeneration == job.SourceGeneration
+            && manifest.RecipeVersion == job.RecipeVersion
+            && manifest.Sources.Count > 0 && manifest.Sources[0].Fingerprint == fingerprint
+            && PreparationArtifacts.IsVerifiedOutput(outputFullPath, manifest);
+        var validation = provenanceMatches
+            ? await validator.ValidateAsync(outputFullPath, sourceDurationMs, manifest!.VideoCodec, manifest.AudioCodec, cancellationToken)
+            : OutputValidation.Fail("The existing output does not have matching verified provenance.");
         if (validation.Success)
         {
-            if (manifest is null || manifest.State != "Committed")
-            {
-                var committed = (manifest ?? new PreparationManifest
-                    {
-                        JobId = job.Id,
-                        LessonId = job.LessonId,
-                        SourceGeneration = job.SourceGeneration,
-                        OutputFileName = outputFileName
-                    }) with { State = "Committed", OutputHash = validation.OutputHash, OutputLengthBytes = validation.ByteLength };
-                committed.WriteAtomically(manifestFullPath);
-            }
+            (manifest! with { State = "Committed" }).WriteAtomically(manifestFullPath);
 
             await CompleteAttemptAsync(attempt, 0, null, null, cancellationToken);
             await PublishAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, validation, cancellationToken);
@@ -495,7 +556,7 @@ public sealed class PreparationExecutor(
 
         // The existing file is not a valid current output; quarantine nothing and
         // report failure so a human can inspect it. We never overwrite it blindly.
-        File.Delete(manifestFullPath);
+
         return await FailAsync(
             job,
             attempt,
@@ -507,9 +568,8 @@ public sealed class PreparationExecutor(
 
     private bool CheckDiskReserve(string outputDirectory, out string message)
     {
-        var root = Path.GetPathRoot(Path.GetFullPath(outputDirectory)) ?? "/";
-        var drive = DriveInfo.GetDrives().FirstOrDefault(candidate =>
-            string.Equals(candidate.Name.TrimEnd(Path.DirectorySeparatorChar), root.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase));
+        var mount = PreparationArtifacts.FindContainingMount(outputDirectory, DriveInfo.GetDrives().Select(drive => drive.Name));
+        var drive = mount is null ? null : new DriveInfo(mount);
         if (drive is not null && drive.AvailableFreeSpace < preparationOptions.Value.DiskReserveBytes)
         {
             message = $"Not enough free space to prepare this version. {drive.AvailableFreeSpace / 1_000_000_000.0:0.#} GB free, {preparationOptions.Value.DiskReserveBytes / 1_000_000_000.0:0.#} GB required.";
@@ -521,7 +581,7 @@ public sealed class PreparationExecutor(
     }
 
     private string RelativeToLibraryRoot(string fullPath) =>
-        Path.GetRelativePath(appOptions.Value.LibraryRoot, fullPath).Replace('\\', '/');
+        Path.GetRelativePath(LibraryPathGuard.ResolveRoot(appOptions.Value.LibraryRoot) ?? throw new IOException("Library root is unavailable."), fullPath).Replace('\\', '/');
 
     private static bool IsTransient(string? error) =>
         error is not null

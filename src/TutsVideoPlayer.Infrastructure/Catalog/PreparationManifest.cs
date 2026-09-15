@@ -67,10 +67,15 @@ public sealed record PreparationManifest
         {
             var manifest = JsonSerializer.Deserialize<PreparationManifest>(File.ReadAllText(path));
             return manifest is null || manifest.AppMarker != "tutsvideoplayer" || manifest.SchemaVersion != 1
+                || manifest.State is not ("Prepared" or "Committed")
+                || string.IsNullOrEmpty(manifest.OutputFileName) || Path.GetFileName(manifest.OutputFileName) != manifest.OutputFileName
+                || manifest.OutputLengthBytes <= 0 || manifest.OutputHash is null || manifest.OutputHash.Length != 64
+                || manifest.Sources is null || manifest.Sources.Count == 0
+                || manifest.Sources.Any(source => source is null || source.Fingerprint is null || source.Fingerprint.Length != 64)
                 ? null
                 : manifest;
         }
-        catch (Exception exception) when (exception is IOException or JsonException)
+        catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
         {
             return null;
         }
@@ -79,7 +84,11 @@ public sealed record PreparationManifest
     public void WriteAtomically(string path)
     {
         var temporary = path + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            JsonSerializer.Serialize(stream, this, new JsonSerializerOptions { WriteIndented = true });
+            stream.Flush(flushToDisk: true);
+        }
         File.Move(temporary, path, overwrite: true);
     }
 }

@@ -98,8 +98,12 @@ public partial class Program
 
     private static async Task MigrateAndExitAsync(WebApplicationBuilder builder)
     {
+        var maintenanceOptions = builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions();
+        builder.Services.AddSingleton(Options.Create(maintenanceOptions));
+        builder.Services.AddSingleton<SchemaReadiness>();
+        using var ownership = InstallationLock.Acquire(Path.GetDirectoryName(CatalogRegistration.ResolvePath(maintenanceOptions.DataDirectory, "tutsvideoplayer.db"))!);
         builder.Services.AddCatalog(
-            builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions(),
+            maintenanceOptions,
             builder.Configuration.GetSection(PreparationOptions.SectionName).Get<PreparationOptions>() ?? new PreparationOptions());
         using var app = builder.Build();
         using var scope = app.Services.CreateScope();

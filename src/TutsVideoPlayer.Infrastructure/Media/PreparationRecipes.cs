@@ -14,7 +14,7 @@ public sealed record SourceSetInfo(
     string PrimaryFullPath,
     string? CompanionRelativePath,
     string? CompanionFullPath,
-    ProbeMetadata Probe);
+    ProbeMetadata? Probe);
 
 public static class PreparationRecipes
 {
@@ -30,11 +30,6 @@ public static class PreparationRecipes
     {
         blockedReason = null;
         var extension = Path.GetExtension(source.PrimaryRelativePath).ToLowerInvariant();
-
-        if (extension is ".mp4" or ".m4v" or ".mkv" or ".webm")
-        {
-            return null;
-        }
 
         if (extension is ".wmv")
         {
@@ -58,13 +53,18 @@ public static class PreparationRecipes
                 "-movflags", "+faststart",
                 "-f", "mp4", "-y", "{output}"
             ]);
-            return new PreparationRecipe(WmvVersion, ".mp4", arguments, "aac", RequiresCompanionAudio: false);
+            return new PreparationRecipe(WmvVersion, ".mp4", arguments, source.CompanionFullPath is not null || source.Probe?.AudioCodec is not null ? "aac" : null, RequiresCompanionAudio: false);
         }
 
         if (extension is ".ts" or ".mts" or ".m2ts")
         {
             if (source.CompanionRelativePath is not null)
             {
+                if (source.Probe?.VideoCodec != "h264")
+                {
+                    blockedReason = "unsupported-source-codecs";
+                    return null;
+                }
                 // Split-stream course material: map the video and its companion audio
                 // explicitly, stream-copy both, and let validation prove the result.
                 var arguments = new List<string>
@@ -113,6 +113,18 @@ public static class PreparationRecipes
                 "-f", "mp4", "-y", "{output}"
             };
             return new PreparationRecipe(RemuxVersion, ".mp4", remux, source.Probe?.AudioCodec, RequiresCompanionAudio: false);
+        }
+
+        // Explicit browser fallback and non-exempt containers use a conservative SDR recipe.
+        if (extension is ".mp4" or ".mkv" or ".m4v" or ".webm"
+            && source.Probe?.VideoCodec is "h264" or "vp8" or "vp9" or "mpeg4")
+        {
+            return new PreparationRecipe("compat-h264-v1", ".mp4",
+                ["-i", source.PrimaryFullPath, "-map", "0:v:0", "-map", "0:a:0?",
+                 "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:a", "aac", "-b:a", "192k",
+                 "-movflags", "+faststart", "-f", "mp4", "-y", "{output}"],
+                source.Probe.AudioCodec is null ? null : "aac", false);
         }
 
         blockedReason = "unsupported-source-container";

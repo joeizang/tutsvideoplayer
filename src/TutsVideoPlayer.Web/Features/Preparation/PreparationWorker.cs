@@ -26,6 +26,10 @@ public sealed class PreparationWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using (var readinessScope = scopeFactory.CreateScope())
+        {
+            if (!readinessScope.ServiceProvider.GetRequiredService<SchemaReadiness>().IsReady) return;
+        }
         try
         {
             using var recoveryScope = scopeFactory.CreateScope();

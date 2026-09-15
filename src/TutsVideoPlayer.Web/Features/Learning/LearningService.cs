@@ -86,7 +86,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                     || job.State == PreparationJobState.Validating
                     || job.State == PreparationJobState.Publishing
                     || job.State == PreparationJobState.Blocked
-                    || job.State == PreparationJobState.Interrupted))
+                    || job.State == PreparationJobState.Interrupted
+                    || job.State == PreparationJobState.Failed))
             .OrderByDescending(job => job.Id)
             .FirstOrDefaultAsync(cancellationToken);
 

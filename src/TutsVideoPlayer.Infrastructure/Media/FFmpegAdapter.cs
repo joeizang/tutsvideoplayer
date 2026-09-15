@@ -20,7 +20,7 @@ public sealed class FFmpegAdapter(string ffmpegPath)
 
     public async Task<FFmpegResult> RunAsync(
         IReadOnlyList<string> arguments,
-        Action<double>? progress,
+        Func<double, Task>? progress,
         CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo
@@ -54,13 +54,13 @@ public sealed class FFmpegAdapter(string ffmpegPath)
         var lastProgressUtc = Environment.TickCount64;
         double lastProgressSeconds = 0;
 
-        var stdoutTask = ConsumeProgressAsync(process, seconds =>
+        var stdoutTask = ConsumeProgressAsync(process, async seconds =>
         {
-            lastProgressUtc = Environment.TickCount64;
+            if (seconds > lastProgressSeconds) Interlocked.Exchange(ref lastProgressUtc, Environment.TickCount64);
             lastProgressSeconds = seconds;
-            progress?.Invoke(seconds);
+            if (progress is not null) await progress(seconds);
         }, cancellationToken);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var stderrTask = ReadTailAsync(process.StandardError, cancellationToken);
 
         using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var watchdog = new Timer(_ =>
@@ -73,7 +73,9 @@ public sealed class FFmpegAdapter(string ffmpegPath)
 
         try
         {
-            await process.WaitForExitAsync(watchdogCts.Token);
+            var exit = process.WaitForExitAsync(watchdogCts.Token);
+            if (await Task.WhenAny(exit, stdoutTask) == stdoutTask) await stdoutTask;
+            await exit;
 
             if (!cancellationToken.IsCancellationRequested && watchdogCts.IsCancellationRequested)
             {
@@ -88,12 +90,20 @@ public sealed class FFmpegAdapter(string ffmpegPath)
         catch (OperationCanceledException)
         {
             await KillAsync(process);
+            try { await Task.WhenAll(stdoutTask, stderrTask); } catch (OperationCanceledException) { }
             if (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
 
             return new FFmpegResult(null, Completed: false, "ffmpeg was stopped by the no-progress watchdog.", lastProgressSeconds);
+        }
+
+        catch
+        {
+            await KillAsync(process);
+            try { await Task.WhenAll(stdoutTask, stderrTask); } catch { }
+            throw;
         }
 
         await stdoutTask;
@@ -108,6 +118,18 @@ public sealed class FFmpegAdapter(string ffmpegPath)
         return new FFmpegResult(0, Completed: true, null, lastProgressSeconds);
     }
 
+    private static async Task<string> ReadTailAsync(StreamReader reader, CancellationToken token)
+    {
+        var tail = new System.Text.StringBuilder();
+        var buffer = new char[1024];
+        while (await reader.ReadAsync(buffer.AsMemory(), token) is var read && read > 0)
+        {
+            tail.Append(buffer, 0, read);
+            if (tail.Length > DiagnosticTailLength) tail.Remove(0, tail.Length - DiagnosticTailLength);
+        }
+        return tail.ToString();
+    }
+
     private static async Task KillAsync(Process process)
     {
         try
@@ -120,21 +142,13 @@ public sealed class FFmpegAdapter(string ffmpegPath)
         }
     }
 
-    private static async Task ConsumeProgressAsync(Process process, Action<double> progress, CancellationToken cancellationToken)
+    private static async Task ConsumeProgressAsync(Process process, Func<double, Task> progress, CancellationToken cancellationToken)
     {
-        try
+        while (await process.StandardOutput.ReadLineAsync(cancellationToken) is { } line)
         {
-            while (await process.StandardOutput.ReadLineAsync(cancellationToken) is { } line)
-            {
-                if (line.StartsWith("out_time_us=", StringComparison.Ordinal)
-                    && long.TryParse(line["out_time_us=".Length..], out var microseconds))
-                {
-                    progress(Math.Max(0, microseconds / 1_000_000.0));
-                }
-            }
-        }
-        catch (Exception exception) when (exception is OperationCanceledException or InvalidOperationException or IOException)
-        {
+            if (line.StartsWith("out_time_us=", StringComparison.Ordinal)
+                && long.TryParse(line["out_time_us=".Length..], out var microseconds))
+                await progress(Math.Max(0, microseconds / 1_000_000.0));
         }
     }
 }
