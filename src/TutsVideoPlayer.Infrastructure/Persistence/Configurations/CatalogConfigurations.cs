@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using TutsVideoPlayer.Core.Catalog;
+using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
 
 namespace TutsVideoPlayer.Infrastructure.Persistence.Configurations;
@@ -178,5 +179,41 @@ internal sealed class ScanIssueConfiguration : IEntityTypeConfiguration<ScanIssu
             .HasForeignKey(issue => issue.ScanRunId)
             .OnDelete(DeleteBehavior.Cascade);
         builder.HasIndex(issue => issue.ScanRunId);
+    }
+}
+
+internal sealed class PreparationJobConfiguration : IEntityTypeConfiguration<PreparationJobEntity>
+{
+    public void Configure(EntityTypeBuilder<PreparationJobEntity> builder)
+    {
+        builder.ToTable("PreparationJobs");
+        builder.HasKey(job => job.Id);
+        builder.Property(job => job.Id).ValueGeneratedOnAdd();
+        builder.Property(job => job.DedupKey).IsRequired();
+        builder.Property(job => job.RecipeVersion).IsRequired();
+        builder.Property(job => job.State);
+        builder.Property(job => job.Revision).IsConcurrencyToken();
+        builder.HasOne(job => job.Lesson)
+            .WithMany()
+            .HasForeignKey(job => job.LessonId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasIndex(job => job.DedupKey).IsUnique();
+        builder.HasIndex(job => new { job.State, job.Priority, job.EnqueuedUtcMs, job.Id });
+        builder.HasIndex(job => job.LeaseExpiresUtcMs);
+        builder.HasMany(job => job.Attempts)
+            .WithOne(attempt => attempt.Job)
+            .HasForeignKey(attempt => attempt.JobId)
+            .OnDelete(DeleteBehavior.Cascade);
+    }
+}
+
+internal sealed class PreparationAttemptConfiguration : IEntityTypeConfiguration<PreparationAttemptEntity>
+{
+    public void Configure(EntityTypeBuilder<PreparationAttemptEntity> builder)
+    {
+        builder.ToTable("PreparationAttempts");
+        builder.HasKey(attempt => attempt.Id);
+        builder.Property(attempt => attempt.Id).ValueGeneratedOnAdd();
+        builder.HasIndex(attempt => new { attempt.JobId, attempt.StartedUtcMs });
     }
 }

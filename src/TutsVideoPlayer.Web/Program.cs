@@ -9,6 +9,7 @@ using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Home;
 using TutsVideoPlayer.Web.Features.Library;
 using TutsVideoPlayer.Web.Features.Playback;
+using TutsVideoPlayer.Web.Features.Preparation;
 using TutsVideoPlayer.Web.Features.Watch;
 using TutsVideoPlayer.Web.Hosting;
 using TutsVideoPlayer.Infrastructure.FileSystem;
@@ -57,7 +58,8 @@ builder.Services.AddSingleton<MediaFileLocator>(services =>
 builder.Services.AddSingleton<SystemInfoService>();
 builder.Services.AddSingleton<SchemaReadiness>();
 var appOptions = builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions();
-builder.Services.AddCatalog(appOptions);
+var preparationOptions = builder.Configuration.GetSection(PreparationOptions.SectionName).Get<PreparationOptions>() ?? new PreparationOptions();
+builder.Services.AddCatalog(appOptions, preparationOptions);
 builder.Services.AddHealthChecks()
     .AddCheck<DatabaseReadinessCheck>("database", tags: ["ready"]);
 builder.AddJsxCore();
@@ -96,7 +98,13 @@ public partial class Program
 
     private static async Task MigrateAndExitAsync(WebApplicationBuilder builder)
     {
-        builder.Services.AddCatalog(builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions());
+        var maintenanceOptions = builder.Configuration.GetSection(AppOptions.SectionName).Get<AppOptions>() ?? new AppOptions();
+        builder.Services.AddSingleton(Options.Create(maintenanceOptions));
+        builder.Services.AddSingleton<SchemaReadiness>();
+        using var ownership = InstallationLock.Acquire(Path.GetDirectoryName(CatalogRegistration.ResolvePath(maintenanceOptions.DataDirectory, "tutsvideoplayer.db"))!);
+        builder.Services.AddCatalog(
+            maintenanceOptions,
+            builder.Configuration.GetSection(PreparationOptions.SectionName).Get<PreparationOptions>() ?? new PreparationOptions());
         using var app = builder.Build();
         using var scope = app.Services.CreateScope();
         var initializer = scope.ServiceProvider.GetRequiredService<DatabaseInitializer>();

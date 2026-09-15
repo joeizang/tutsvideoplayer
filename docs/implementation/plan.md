@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestones 0–3 executed on 2026-09-13 with explicit user authorization; milestones M4–M7 remain planned. Every M4+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0–4 executed between 2026-09-13 and 2026-09-15 with explicit user authorization; milestones M5–M7 remain planned. Every M5+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -98,19 +98,25 @@ Post-review corrections (PR #4 inline comments, [m3-review-responses.md](../m3-r
 
 Dependencies: M1–M3.
 
-- [ ] Implement PreparationJob invariants, dedup keys, attempts, leases, queue pause, and priority.
-- [ ] Add single-process installation ownership and scoped background job orchestration.
-- [ ] Compute full source-set fingerprints before preparation.
-- [ ] Implement WMV-to-MP4 and TS/AAC mapping recipes with source resolution/aspect preservation.
-- [ ] Add automatic non-MP4/non-MKV scheduling and explicit MP4/MKV compatibility requests.
-- [ ] Implement source-adjacent temporary/final output paths and versioned manifests.
-- [ ] Implement output validation and the recoverable publication protocol.
-- [ ] Reconcile crash windows before requeueing; skip current valid outputs.
-- [ ] Present permanent copies as renditions of the same logical lesson.
-- [ ] Add preparation status, priority, pause/resume, blocked, retry, and failure UI.
-- [ ] Add disk reserve checks and bounded process diagnostics.
+Evidence (2026-09-15): all items below completed. The `PreparationJobs` migration adds durable jobs and bounded attempt records; permanent copies land beside their sources as `<stem>.tvp-<fingerprint>.mp4` with Committed manifests.
+
+- [x] Implement PreparationJob invariants, dedup keys, attempts, leases, queue pause, and priority.
+- [x] Add single-process installation ownership and scoped background job orchestration.
+- [x] Compute full source-set fingerprints before preparation.
+- [x] Implement WMV-to-MP4 and TS/AAC mapping recipes with source resolution/aspect preservation.
+- [x] Add automatic non-MP4/non-MKV scheduling and explicit MP4/MKV compatibility requests.
+- [x] Implement source-adjacent temporary/final output paths and versioned manifests.
+- [x] Implement output validation and the recoverable publication protocol.
+- [x] Reconcile crash windows before requeueing; skip current valid outputs.
+- [x] Present permanent copies as renditions of the same logical lesson.
+- [x] Add preparation status, priority, pause/resume, blocked, retry, and failure UI.
+- [x] Add disk reserve checks and bounded process diagnostics.
 
 Exit evidence: correct WMV and split-stream playback; original byte preservation; no duplicate lesson/job after repeated scans; successful recovery at every publication boundary; no partial output served; queue pause semantics visible.
+
+Recorded results: the full real-library queue ran to completion — 94/94 jobs Succeeded (60 WMVs encoded to H.264/AAC at native sizes such as 1024×768; 34 split TS/AAC lessons mapped with stream copy). ffprobe of a prepared TS output shows both h264 video and aac audio with duration within 3 ms of the 217 s source; a prepared WMV plays in the browser at its native 1024×768 through `/media/renditions/{id}` with byte-range seeking. Source TS, AAC, and WMV files are byte-identical after preparation (SHA-256), permanent copies carry Committed manifests beside their originals, and a rescan after 94 conversions kept 34 lessons in the TS course with no duplicate jobs or lessons. Integration tests cover scheduling exemptions, queue-pause 428/If-Match semantics, dedup convergence, and the manifest/publication protocol. Managed outputs (`.tvp-*.mp4` and `.tvp.json`) are excluded from discovery so a converted copy never becomes a second lesson.
+
+Post-review corrections: see [M4 review responses](../m4-review-responses.md) for recovery, provenance, scheduling, configuration, progress, and UI fixes. Validation uses isolated fixtures; the original whole-library run above was not repeated.
 
 ## M5: Quality preparation and safe cache management
 

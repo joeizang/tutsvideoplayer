@@ -19,6 +19,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<PlaybackSessionEntity> PlaybackSessions => Set<PlaybackSessionEntity>();
     public DbSet<RenditionEntity> Renditions => Set<RenditionEntity>();
     public DbSet<PreferenceEntity> Preferences => Set<PreferenceEntity>();
+    public DbSet<PreparationJobEntity> PreparationJobs => Set<PreparationJobEntity>();
+    public DbSet<PreparationAttemptEntity> PreparationAttempts => Set<PreparationAttemptEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -4,9 +4,11 @@ import type {
     LibraryHomeModel,
     CourseSummaryModel,
     ContinueLearningEntryModel,
+    PreparationJobModel,
     ScanStatusModel
 } from "dotnet:types/TutsVideoPlayer/Web/Models";
 import { RefreshLibraryButton } from "../Shared/RefreshLibraryButton.tsx";
+import { QueueJobList } from "../Shared/QueueJobList.tsx";
 import "/css/app.css";
 
 export const head = (model: LibraryHomeModel) => ({
@@ -32,11 +34,14 @@ function formatClock(durationMs: number | null | undefined): string | null {
 
 export default function Index({ model }: ViewProps<LibraryHomeModel>) {
     const [summary] = useState(model.summary);
+    const [initialJobs] = useState<PreparationJobModel[] | null>(null);
     const courses = model.courses;
     const query = model.searchQuery;
     const continueEntries = model.continueEntries ?? [];
     const scanNotice = scanLabel(summary.latestScan);
     const lastPage = Math.max(1, Math.ceil(model.matchingCourseCount / model.pageSize));
+    const [queue] = useState(model.queue);
+    const hasQueueActivity = queue.running + queue.queued + queue.failed + queue.blocked > 0;
 
     return (
         <main className="mx-auto min-h-screen max-w-5xl bg-canvas px-5 py-8 pb-12 text-ink dark:bg-neutral-900 dark:text-neutral-100">
@@ -58,6 +63,12 @@ export default function Index({ model }: ViewProps<LibraryHomeModel>) {
                 <p className={`mb-4 rounded-lg border px-3 py-2 text-sm ${summary.latestScan?.state === "Failed" ? "border-danger/30 text-danger dark:text-red-400" : "border-ink/10 bg-surface text-ink-soft dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-400"}`}>
                     {scanNotice}
                 </p>
+            ) : null}
+
+            {hasQueueActivity ? (
+                <div className="mb-6">
+                    <QueueJobList initialJobs={initialJobs} initialPaused={queue.paused} />
+                </div>
             ) : null}
 
             {continueEntries.length > 0 ? (

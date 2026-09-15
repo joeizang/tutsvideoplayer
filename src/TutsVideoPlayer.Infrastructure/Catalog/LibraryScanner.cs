@@ -37,7 +37,7 @@ public sealed class LibraryScanner(
             return new ScanOutcome(0, 0, Succeeded: false);
         }
 
-        var discovered = Discover(enumeration);
+        var discovered = Discover(enumeration, root);
         var issueBuffer = new IssueBuffer(enumeration.Issues);
         await InspectChangedSourcesAsync(discovered.Lessons, root, issueBuffer, cancellationToken);
 
@@ -71,12 +71,23 @@ public sealed class LibraryScanner(
             run.FinishedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             await context.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
 
             logger.LogInformation(
                 "Scan {ScanRunId} discovered {LessonCount} lessons and {SubtitleCount} subtitle candidates with {IssueCount} issues.",
                 scanRunId, discovered.Lessons.Count, discovered.Subtitles.Count, issueBuffer.Count);
 
+            await transaction.CommitAsync(cancellationToken);
+            // Scheduling is repairable after catalog commit; it must not rewrite a successful scan as failed.
+            await transaction.DisposeAsync();
+            try
+            {
+                context.ChangeTracker.Clear();
+                await PreparationScheduler.ScheduleCompatibilityJobsAsync(context, library.Id, root, logger, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Preparation scheduling will be retried after a later scan.");
+            }
             return new ScanOutcome(discovered.Lessons.Count, discovered.Subtitles.Count, Succeeded: true);
         }
         catch (OperationCanceledException)
@@ -101,7 +112,7 @@ public sealed class LibraryScanner(
         }
     }
 
-    private Discovery Discover(LibraryEnumeration enumeration)
+    private Discovery Discover(LibraryEnumeration enumeration, string root)
     {
         var issues = enumeration.Issues;
         var reservedDirs = new HashSet<string>(StringComparer.Ordinal);
@@ -112,6 +123,11 @@ public sealed class LibraryScanner(
 
         foreach (var file in enumeration.Files)
         {
+            if (PreparationArtifacts.IsOwnedOutput(root, file.RelativePath))
+            {
+                continue;
+            }
+
             var segments = file.RelativePath.Split('/');
             string? reservedAncestor = null;
             foreach (var segment in segments[..^1])
@@ -647,7 +663,7 @@ public sealed class LibraryScanner(
         await context.SaveChangesAsync(cancellationToken);
     }
 
-    internal static ProbeMetadata? ParseProbeMetadata(string? json)
+    public static ProbeMetadata? ParseProbeMetadata(string? json)
     {
         if (json is null)
         {

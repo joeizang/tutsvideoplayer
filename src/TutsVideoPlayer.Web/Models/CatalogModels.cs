@@ -95,6 +95,7 @@ public sealed record LibraryHomeModel(
     [property: JsonPropertyName("summary")] LibrarySummaryModel Summary,
     [property: JsonPropertyName("courses")] IReadOnlyList<CourseSummaryModel> Courses,
     [property: JsonPropertyName("continueEntries")] IReadOnlyList<ContinueLearningEntryModel> ContinueEntries,
+    [property: JsonPropertyName("queue")] QueueSummaryModel Queue,
     [property: JsonPropertyName("searchQuery")] string? SearchQuery,
     [property: JsonPropertyName("page")] int Page,
     [property: JsonPropertyName("pageSize")] int PageSize,

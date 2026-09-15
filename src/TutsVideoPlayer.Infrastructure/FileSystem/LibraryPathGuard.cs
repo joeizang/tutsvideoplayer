@@ -59,7 +59,7 @@ public static class LibraryPathGuard
         return true;
     }
 
-    private static string? ResolveRoot(string root)
+    public static string? ResolveRoot(string root)
     {
         string fullRoot;
         try

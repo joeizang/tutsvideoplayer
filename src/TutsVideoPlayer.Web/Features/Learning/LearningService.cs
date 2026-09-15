@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using TutsVideoPlayer.Core.Catalog;
+using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Core.Learning;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
@@ -77,6 +78,19 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
             .OrderByDescending(rendition => rendition.Height ?? 0)
             .ToListAsync(cancellationToken);
 
+        var activeJob = await context.PreparationJobs.AsNoTracking()
+            .Where(job => job.LessonId == lessonId
+                && job.SourceGeneration == lesson.SourceGeneration
+                && (job.State == PreparationJobState.Queued
+                    || job.State == PreparationJobState.Running
+                    || job.State == PreparationJobState.Validating
+                    || job.State == PreparationJobState.Publishing
+                    || job.State == PreparationJobState.Blocked
+                    || job.State == PreparationJobState.Interrupted
+                    || job.State == PreparationJobState.Failed))
+            .OrderByDescending(job => job.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
         var preferences = await EnsurePreferencesAsync(cancellationToken);
         var subtitleCandidates = await subtitles.GetCandidatesAsync(lessonId, cancellationToken);
         // The resolved track and its visibility are separate facts. Blanking the selection
@@ -99,9 +113,27 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                     : null))
             .ToList();
 
+        if (activeJob is not null)
+        {
+            renditionModels.Add(new RenditionModel(
+                $"job-{activeJob.Id.ToString(CultureInfo.InvariantCulture)}",
+                "Playback copy (preparing)",
+                null,
+                null,
+                "application/octet-stream",
+                null,
+                activeJob.State.ToString(),
+                "Permanent",
+                null,
+                activeJob.Id.ToString(CultureInfo.InvariantCulture),
+                activeJob.Progress,
+                activeJob.UserMessage));
+        }
+
         var readyDefault = renditions
             .Where(rendition => rendition.Status == RenditionStatus.Ready)
             .OrderByDescending(rendition => rendition.Height ?? 0)
+            .ThenBy(rendition => rendition.RetentionClass == RenditionRetention.Permanent ? 0 : 1)
             .FirstOrDefault();
 
         var effective = progress is null
