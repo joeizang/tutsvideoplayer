@@ -41,9 +41,17 @@ public sealed class PreparationWorker(
                 probeAdapter,
                 ffmpegAdapter,
                 new PreparedOutputValidator(probeAdapter),
+                recoveryScope.ServiceProvider.GetRequiredService<CacheAccounting>(),
+                recoveryScope.ServiceProvider.GetRequiredService<CacheEvictionService>(),
                 recoveryScope.ServiceProvider.GetRequiredService<ILogger<PreparationExecutor>>());
 
             await recoveryExecutor.RecoverInterruptedAsync(stoppingToken);
+            await recoveryScope.ServiceProvider.GetRequiredService<CacheEvictionService>()
+                .ReconcileInterruptedEvictionsAsync(stoppingToken);
+
+            // Boot is also the moment to notice that the configured limit no longer fits
+            // what is stored — for instance because it was lowered while the host was down.
+            await EnforceCacheLimitAsync(recoveryScope, stoppingToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -67,6 +75,11 @@ public sealed class PreparationWorker(
                 var claimed = await ClaimNextAsync(context, stoppingToken);
                 if (claimed is null)
                 {
+                    // Cleanup that could not finish earlier is retried while the queue is
+                    // idle: a lowered cache limit, or copies that were protected by a live
+                    // playback lease that has since ended, both become actionable here
+                    // without waiting for another quality encode to be requested.
+                    await EnforceCacheLimitAsync(scope, stoppingToken);
                     await Task.Delay(IdlePoll, stoppingToken);
                     continue;
                 }
@@ -78,6 +91,8 @@ public sealed class PreparationWorker(
                     probeAdapter,
                     ffmpegAdapter,
                     new PreparedOutputValidator(probeAdapter),
+                    scope.ServiceProvider.GetRequiredService<CacheAccounting>(),
+                    scope.ServiceProvider.GetRequiredService<CacheEvictionService>(),
                     scope.ServiceProvider.GetRequiredService<ILogger<PreparationExecutor>>());
 
                 logger.LogInformation("Claimed preparation job {JobId} (attempt {Attempt}).", claimed.Id, claimed.Attempt);
@@ -98,6 +113,33 @@ public sealed class PreparationWorker(
                 {
                 }
             }
+        }
+    }
+
+    private async Task EnforceCacheLimitAsync(IServiceScope scope, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var accounting = scope.ServiceProvider.GetRequiredService<CacheAccounting>();
+            var limit = await accounting.GetCacheLimitAsync(cancellationToken);
+            var usage = await accounting.GetChargeableQualityBytesAsync(cancellationToken);
+            if (usage <= limit)
+            {
+                return;
+            }
+
+            var outcome = await scope.ServiceProvider.GetRequiredService<CacheEvictionService>()
+                .EvictUntilUnderLimitAsync(limit, cancellationToken);
+            if (outcome.EvictedCount > 0)
+            {
+                logger.LogInformation(
+                    "Idle cleanup evicted {Count} quality copy(ies) reclaiming {Bytes} bytes.",
+                    outcome.EvictedCount, outcome.ReclaimedBytes);
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Idle cache cleanup failed; it will be retried.");
         }
     }
 

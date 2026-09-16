@@ -18,6 +18,7 @@ public sealed record RenditionModel(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("retentionClass")] string RetentionClass,
     [property: JsonPropertyName("mediaUrl")] string? MediaUrl,
+    [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("preparationJobId")] string? PreparationJobId = null,
     [property: JsonPropertyName("progress")] double? Progress = null,
     [property: JsonPropertyName("userMessage")] string? UserMessage = null);
@@ -117,6 +118,8 @@ public sealed record SettingsModel(
     [property: JsonPropertyName("autoplay")] bool Autoplay,
     [property: JsonPropertyName("fitMode")] string FitMode,
     [property: JsonPropertyName("subtitleEnabled")] bool SubtitleEnabled,
+    [property: JsonPropertyName("preferredQuality")] string? PreferredQuality,
+    [property: JsonPropertyName("cacheLimitBytes")] long CacheLimitBytes,
     [property: JsonPropertyName("revision")] int Revision);
 
 public sealed record QueueSummaryModel(
@@ -128,7 +131,8 @@ public sealed record QueueSummaryModel(
     [property: JsonPropertyName("blocked")] int Blocked);
 
 public sealed record PreparationRequestModel(
-    [property: JsonPropertyName("purpose")] string? Purpose);
+    [property: JsonPropertyName("purpose")] string? Purpose,
+    [property: JsonPropertyName("profile")] string? Profile = null);
 
 public sealed record PreparationJobModel(
     [property: JsonPropertyName("id")] string Id,
@@ -150,4 +154,6 @@ public sealed record SettingsUpdateModel(
     [property: JsonPropertyName("playbackSpeed")] double? PlaybackSpeed,
     [property: JsonPropertyName("autoplay")] bool? Autoplay,
     [property: JsonPropertyName("fitMode")] string? FitMode,
-    [property: JsonPropertyName("subtitleEnabled")] bool? SubtitleEnabled);
+    [property: JsonPropertyName("subtitleEnabled")] bool? SubtitleEnabled,
+    [property: JsonPropertyName("preferredQuality")] string? PreferredQuality,
+    [property: JsonPropertyName("cacheLimitBytes")] long? CacheLimitBytes);

@@ -1,6 +1,6 @@
 # Implementation plan
 
-Status: milestones 0–4 executed between 2026-09-13 and 2026-09-15 with explicit user authorization; milestones M5–M7 remain planned. Every M5+ checklist item is intentionally incomplete and requires its own authorization.
+Status: milestones 0–5 executed between 2026-09-13 and 2026-09-15 with explicit user authorization; milestones M6–M7 remain planned. Every M6+ checklist item is intentionally incomplete and requires its own authorization.
 
 ## Delivery discipline
 
@@ -122,16 +122,20 @@ Post-review corrections: see [M4 review responses](../m4-review-responses.md) fo
 
 Dependencies: M4.
 
-- [ ] Implement native/1080/720/480 eligibility and honest nonstandard dimension labels.
-- [ ] Add selected-lesson and course quality requests without upscaling or duplicate native renditions.
-- [ ] Implement default quality fallback and explicit source selection.
-- [ ] Restore position, pause, speed, volume, and subtitles on quality change.
-- [ ] Add quality reservation accounting and growth checks under the 20 GB budget.
-- [ ] Implement playback lease protection and two-phase eviction of owned quality files.
-- [ ] Exclude permanent conversions from eviction and account for them separately.
-- [ ] Add storage settings, pending cleanup, and full-disk recovery flows.
+Evidence (2026-09-15): all items below completed. The `QualityPreparation` migration adds per-job reservations; quality copies live under `<library-root>/.tutsvideoplayer/quality/<lesson>/<generation>/` with manifests, counted against the 20 GB budget while permanent copies stay outside it.
+
+- [x] Implement native/1080/720/480 eligibility and honest nonstandard dimension labels.
+- [x] Add selected-lesson and course quality requests without upscaling or duplicate native renditions.
+- [x] Implement default quality fallback and explicit source selection.
+- [x] Restore position, pause, speed, volume, and subtitles on quality change.
+- [x] Add quality reservation accounting and growth checks under the 20 GB budget.
+- [x] Implement playback lease protection and two-phase eviction of owned quality files.
+- [x] Exclude permanent conversions from eviction and account for them separately.
+- [x] Add storage settings, pending cleanup, and full-disk recovery flows.
 
 Exit evidence: source ≥1080 selects 1080 when ready; 720 source never claims 1080; 4:3 preserved; cache cannot delete permanent/active files; cleanup recovers after restart; playback remains responsive during preparation.
+
+Recorded results: eligibility verified in Core tests (a 720p source offers only 480; a 1024×768 source offers 720/480 with honest "480p (640×480)" labels; 4:3 aspect preserved with even dimensions). Integration tests verify quality requests (dedup, re-preparation after eviction), preferred-quality default selection with fallback, storage accounting, cache-full blocking, LRU eviction sparing protected (leased) and permanent renditions, and budget honesty after churn. Browser-verified on the real library: a 480p version prepared from the 1024×768 WMV (4:3 preserved, source bytes unchanged), the quality menu switching between renditions with position and pause state preserved, and `/api/v1/storage` reporting permanent (1.01 GB) and quality (0.6 MB) bytes separately.
 
 ## M6: Transfer, backup, and operational packaging
 

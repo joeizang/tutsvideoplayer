@@ -4,9 +4,12 @@ using Microsoft.Data.Sqlite;
 using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Core.Learning;
+using TutsVideoPlayer.Core.Preparation;
+using TutsVideoPlayer.Infrastructure.Catalog;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
 using TutsVideoPlayer.Web.Models;
+using TutsVideoPlayer.Web.Features.Preparation;
 using TutsVideoPlayer.Web.Features.Subtitles;
 
 namespace TutsVideoPlayer.Web.Features.Learning;
@@ -110,7 +113,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                 rendition.RetentionClass.ToString(),
                 rendition.Status == RenditionStatus.Ready
                     ? $"/media/renditions/{rendition.Id.ToString(CultureInfo.InvariantCulture)}"
-                    : null))
+                    : null,
+                rendition.Profile))
             .ToList();
 
         if (activeJob is not null)
@@ -125,16 +129,21 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                 activeJob.State.ToString(),
                 "Permanent",
                 null,
+                activeJob.Profile,
                 activeJob.Id.ToString(CultureInfo.InvariantCulture),
                 activeJob.Progress,
                 activeJob.UserMessage));
         }
 
-        var readyDefault = renditions
-            .Where(rendition => rendition.Status == RenditionStatus.Ready)
-            .OrderByDescending(rendition => rendition.Height ?? 0)
-            .ThenBy(rendition => rendition.RetentionClass == RenditionRetention.Permanent ? 0 : 1)
-            .FirstOrDefault();
+        var readyDefault = SelectDefaultRendition(renditions, preferences.PreferredQuality);
+
+        // Explicit lesson opening: when the preferred quality is eligible but every
+        // ready rendition is taller (or the only playable rendition is the taller
+        // original), queue the preferred version instead of silently degrading.
+        if (lesson.Availability == CatalogAvailability.Available)
+        {
+            await QualityScheduling.TryQueuePreferredQualityAsync(context, lessonId, preferences.PreferredQuality, cancellationToken);
+        }
 
         var effective = progress is null
             ? false
@@ -537,6 +546,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
             preferences.Autoplay,
             preferences.FitMode,
             preferences.SubtitleEnabled,
+            preferences.PreferredQuality,
+            preferences.CacheLimitBytes,
             preferences.Revision);
     }
 
@@ -587,6 +598,26 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
             preferences.SubtitleEnabled = update.SubtitleEnabled.Value;
         }
 
+        if (update.PreferredQuality is not null)
+        {
+            if (update.PreferredQuality.Length > 0 && !QualityProfiles.IsKnown(update.PreferredQuality))
+            {
+                throw new ArgumentException("Preferred quality must be 1080, 720, or 480.");
+            }
+
+            preferences.PreferredQuality = update.PreferredQuality.Length == 0 ? null : update.PreferredQuality.ToLowerInvariant();
+        }
+
+        if (update.CacheLimitBytes.HasValue)
+        {
+            if (update.CacheLimitBytes.Value < CacheAccounting.MinimumCacheLimitBytes)
+            {
+                throw new ArgumentException($"The cache limit must be at least {CacheAccounting.MinimumCacheLimitBytes} bytes.");
+            }
+
+            preferences.CacheLimitBytes = update.CacheLimitBytes.Value;
+        }
+
         preferences.Revision++;
         await context.SaveChangesAsync(cancellationToken);
 
@@ -595,6 +626,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
             preferences.Autoplay,
             preferences.FitMode,
             preferences.SubtitleEnabled,
+            preferences.PreferredQuality,
+            preferences.CacheLimitBytes,
             preferences.Revision);
     }
 
@@ -677,13 +710,62 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
     private static string RenditionLabel(RenditionEntity rendition) =>
         rendition.Purpose switch
         {
-            RenditionPurpose.Source when rendition.Width is not null && rendition.Height is not null
-                => $"Original ({rendition.Width}×{rendition.Height})",
-            RenditionPurpose.Source => "Original",
+            RenditionPurpose.Source => QualityProfiles.LabelFor(null, rendition.Width, rendition.Height),
             RenditionPurpose.Compatibility => "Playback copy",
-            RenditionPurpose.Quality => rendition.Profile ?? "Quality version",
+            RenditionPurpose.Quality => rendition.Profile is null
+                ? "Quality version"
+                : QualityProfiles.LabelFor(rendition.Profile, rendition.Width, rendition.Height),
             _ => "Rendition"
         };
+
+    /// <summary>
+    /// PRD 0003 default selection: the preferred profile's ready rendition wins;
+    /// otherwise the highest ready rendition at or below the preferred height;
+    /// otherwise (only taller playable renditions) the tallest ready rendition
+    /// plays immediately while the preferred version is queued.
+    /// </summary>
+    private static RenditionEntity? SelectDefaultRendition(
+        IReadOnlyList<RenditionEntity> renditions,
+        string? preferredQuality)
+    {
+        var ready = renditions.Where(rendition => rendition.Status == RenditionStatus.Ready).ToList();
+        if (ready.Count == 0)
+        {
+            return null;
+        }
+
+        static int OrderKey(RenditionEntity rendition) => rendition.Height ?? 0;
+
+        if (preferredQuality is not null)
+        {
+            var preferredMatch = ready.FirstOrDefault(rendition =>
+                string.Equals(rendition.Profile, preferredQuality, StringComparison.OrdinalIgnoreCase));
+            if (preferredMatch is not null)
+            {
+                return preferredMatch;
+            }
+
+            var preferredHeight = QualityProfiles.TargetHeight(preferredQuality);
+            if (preferredHeight is not null)
+            {
+                var atOrBelow = ready
+                    .Where(rendition => (rendition.Height ?? 0) <= preferredHeight.Value)
+                    .OrderByDescending(OrderKey)
+                    .ThenBy(rendition => rendition.RetentionClass == RenditionRetention.Permanent ? 0 : 1)
+                    .FirstOrDefault();
+                if (atOrBelow is not null)
+                {
+                    return atOrBelow;
+                }
+            }
+        }
+
+        // No preferred fallback applies: prefer at-or-below 1080, else the tallest.
+        return ready
+            .OrderByDescending(rendition => (rendition.Height ?? 0) > 1080 ? -1 : OrderKey(rendition))
+            .ThenBy(rendition => rendition.RetentionClass == RenditionRetention.Permanent ? 0 : 1)
+            .First();
+    }
 
     private static string MediaMimeType(string relativePath) => Path.GetExtension(relativePath).ToLowerInvariant() switch
     {

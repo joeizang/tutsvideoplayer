@@ -313,16 +313,16 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.False(defaults.Autoplay);
 
         var unconditional = await client.PutAsJsonAsync("/api/v1/settings",
-            new SettingsUpdateModel(PlaybackSpeed: 1.5, null, null, null),
+            new SettingsUpdateModel(PlaybackSpeed: 1.5, null, null, null, null, null),
             TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.PreconditionRequired, unconditional.StatusCode);
 
         var update = await PutSettingsAsync(client,
-            new SettingsUpdateModel(PlaybackSpeed: 1.5, Autoplay: true, FitMode: "Fill", SubtitleEnabled: null));
+            new SettingsUpdateModel(PlaybackSpeed: 1.5, Autoplay: true, FitMode: "Fill", SubtitleEnabled: null, null, null));
         update.EnsureSuccessStatusCode();
         Assert.NotNull(update.Headers.ETag);
 
-        var invalid = await PutSettingsAsync(client, new SettingsUpdateModel(PlaybackSpeed: 1.3, null, null, null));
+        var invalid = await PutSettingsAsync(client, new SettingsUpdateModel(PlaybackSpeed: 1.3, null, null, null, null, null));
         Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
 
         var lesson = (await GetAlphaTreeAsync(client)).Nodes.First(node => node.Type == "lesson");

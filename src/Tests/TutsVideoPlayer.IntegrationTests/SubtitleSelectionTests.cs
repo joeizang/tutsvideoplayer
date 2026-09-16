@@ -16,7 +16,7 @@ public class SubtitleSelectionTests(TestApplication application)
         var current = await client.GetFromJsonAsync<SettingsModel>("/api/v1/settings", TestContext.Current.CancellationToken);
         var request = new HttpRequestMessage(HttpMethod.Put, "/api/v1/settings")
         {
-            Content = JsonContent.Create(new SettingsUpdateModel(null, null, null, SubtitleEnabled: enabled))
+            Content = JsonContent.Create(new SettingsUpdateModel(null, null, null, SubtitleEnabled: enabled, null, null))
         };
         request.Headers.IfMatch.ParseAdd($"\"{current!.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)}\"");
         return await client.SendAsync(request, TestContext.Current.CancellationToken);

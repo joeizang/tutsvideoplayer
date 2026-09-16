@@ -30,6 +30,8 @@ public sealed class PreparationExecutor(
     FFprobeAdapter probeAdapter,
     FFmpegAdapter ffmpegAdapter,
     PreparedOutputValidator validator,
+    CacheAccounting cacheAccounting,
+    CacheEvictionService evictionService,
     ILogger<PreparationExecutor> logger)
 {
     private const int MaxAutomaticAttempts = 3;
@@ -78,6 +80,21 @@ public sealed class PreparationExecutor(
             {
                 return await FailAsync(job, attempt, "source-changed", "The source generation changed; use the current lesson's preparation.", true, cancellationToken);
             }
+
+            if (job.Purpose == RenditionPurpose.Quality)
+            {
+                return await ExecuteQualityAsync(
+                    job,
+                    attempt,
+                    new SourceSetInfo(video.RelativePath, videoFullPath, companion?.RelativePath, companionFullPath, null),
+                    videoFullPath,
+                    video,
+                    companionFullPath,
+                    companion,
+                    null,
+                    cancellationToken);
+            }
+
             var inspected = await probeAdapter.ProbeAsync(videoFullPath, cancellationToken);
             var probe = inspected.Success
                 ? new ProbeMetadata(inspected.DurationMs, inspected.VideoCodec, inspected.AudioCodec, inspected.Width, inspected.Height)
@@ -263,6 +280,524 @@ public sealed class PreparationExecutor(
         }
     }
 
+    private async Task<PreparationOutcome> ExecuteQualityAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        SourceSetInfo sourceSet,
+        string videoFullPath,
+        SourceComponentEntity video,
+        string? companionFullPath,
+        SourceComponentEntity? companion,
+        ProbeMetadata? probe,
+        CancellationToken cancellationToken)
+    {
+        var profile = job.Profile;
+        if (!QualityProfiles.IsKnown(profile))
+        {
+            return await FailAsync(job, attempt, "unknown-profile", "The requested quality profile is not known.", permanent: true, cancellationToken);
+        }
+
+        // Quality work always measures the real source: probe fresh rather than
+        // trusting cached dimensions, which the compatibility path may not have
+        // gathered before the dispatch.
+        var qualityProbe = await probeAdapter.ProbeAsync(videoFullPath, cancellationToken);
+        if (!qualityProbe.Success)
+        {
+            return await FailAsync(job, attempt, "probe-failed", qualityProbe.Error ?? "The source could not be probed.", permanent: true, cancellationToken);
+        }
+
+        // The quality branch is dispatched with no cached probe, so everything downstream —
+        // progress, the audio decision and duration validation — has to use this one.
+        var sourceProbe = new ProbeMetadata(
+            qualityProbe.DurationMs, qualityProbe.VideoCodec, qualityProbe.AudioCodec, qualityProbe.Width, qualityProbe.Height);
+        var sourceWidth = qualityProbe.Width;
+        var sourceHeight = qualityProbe.Height;
+        if (sourceWidth is not > 0 || sourceHeight is not > 0)
+        {
+            return await FailAsync(job, attempt, "probe-incomplete", "The source dimensions are unknown, so no quality version can be prepared.", permanent: true, cancellationToken);
+        }
+
+        var targetHeight = QualityProfiles.TargetHeight(profile)!.Value;
+        if (targetHeight >= sourceHeight.Value)
+        {
+            // The native rendition already serves this quality; upscaling is never offered.
+            return await FailAsync(
+                job,
+                attempt,
+                "profile-eligibility",
+                $"The requested {profile}p quality is not below the source height ({sourceHeight}p); the original already provides this quality.",
+                permanent: true,
+                cancellationToken);
+        }
+
+        // An existing rendition for this profile means the work is either already done
+        // (adopt) or vanished (prepare fresh) — dedup happened at scheduling time.
+        var existing = await context.Renditions
+            .SingleOrDefaultAsync(candidate => candidate.LessonId == job.LessonId
+                && candidate.SourceGeneration == job.SourceGeneration
+                && candidate.Purpose == RenditionPurpose.Quality
+                && candidate.Profile == profile, cancellationToken);
+        if (existing is not null && existing.Status == RenditionStatus.Ready
+            && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, existing.RelativePath, out var existingFullPath))
+        {
+            var existingValidation = await validator.ValidateAsync(existingFullPath, sourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken);
+            if (existingValidation.Success)
+            {
+                await CompleteAttemptAsync(attempt, 0, null, null, cancellationToken);
+                await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
+                await context.SaveChangesAsync(cancellationToken);
+                return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
+            }
+        }
+
+        // Cache budget: ready + reserved must leave room for the reservation. Evict
+        // least-recently-watched quality copies if needed; block when impossible.
+        var cacheLimit = await cacheAccounting.GetCacheLimitAsync(cancellationToken);
+        var reservation = new FileInfo(videoFullPath).Length;
+        var usage = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
+            + await cacheAccounting.GetReservedQualityBytesAsync(cancellationToken);
+        if (usage + reservation > cacheLimit)
+        {
+            await evictionService.EvictUntilUnderLimitAsync(cacheLimit - reservation, cancellationToken);
+            usage = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
+                + await cacheAccounting.GetReservedQualityBytesAsync(cancellationToken);
+            if (usage + reservation > cacheLimit)
+            {
+                return await BlockAsync(
+                    job,
+                    attempt,
+                    "cache-full",
+                    $"Not enough quality cache space to prepare this version. The {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version needs about {cacheAccounting.DescribeBytes(reservation)}; the cache limit is {cacheAccounting.DescribeBytes(cacheLimit)}. Reduce the limit's contents or raise the limit in settings.",
+                    cancellationToken);
+            }
+        }
+
+        job.ReservedBytes = reservation;
+        await context.SaveChangesAsync(cancellationToken);
+
+        var (scaledWidth, scaledHeight) = QualityProfiles.ScaledDimensions(sourceWidth.Value, sourceHeight.Value, targetHeight);
+
+        // A companion carries the audio when one exists; otherwise the source's own track,
+        // which may legitimately be absent. Audio is only required of the output when the
+        // input actually has some, so a silent source is not failed for missing AAC.
+        var incomingAudioCodec = companionFullPath is not null ? "aac" : sourceProbe.AudioCodec;
+        var hasAudio = incomingAudioCodec is not null;
+        var needsAudioTranscode = hasAudio && incomingAudioCodec != "aac";
+        var expectedAudioCodec = !hasAudio ? null : needsAudioTranscode ? "aac" : incomingAudioCodec;
+
+        var audioArguments = companionFullPath is not null
+            ? new[] { "-i", companionFullPath, "-map", "0:v:0", "-map", "1:a:0" }
+            : new[] { "-map", "0:v:0", "-map", "0:a:0?" };
+        var audioCodecArguments = needsAudioTranscode || !hasAudio
+            ? new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k" }
+            : new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy" };
+
+        var arguments = new List<string> { "-i", videoFullPath };
+        arguments.AddRange(audioArguments);
+        arguments.AddRange(audioCodecArguments);
+        arguments.AddRange(
+        [
+            "-vf", $"scale={scaledWidth.ToString(CultureInfo.InvariantCulture)}:{scaledHeight.ToString(CultureInfo.InvariantCulture)}",
+            "-movflags", "+faststart",
+            "-f", "mp4", "-y", "{output}"
+        ]);
+
+        var fingerprint = SourceFingerprint.Compute(
+        [
+            ("video", video.RelativePath, videoFullPath),
+            .. companion is not null && companionFullPath is not null
+                ? new[] { ("companion-audio", companion.RelativePath, companionFullPath) }
+                : Array.Empty<(string, string, string)>()
+        ]);
+
+        var qualityDirectory = Path.Combine(appOptions.Value.LibraryRoot, ".tutsvideoplayer", "quality",
+            job.LessonId.ToString(CultureInfo.InvariantCulture), job.SourceGeneration.ToString(CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(qualityDirectory);
+
+        var outputFileName = $"{SanitizeStem(video.RelativePath)}-{profile.ToLowerInvariant()}-{fingerprint[..12]}.mp4";
+        var outputFullPath = Path.Combine(qualityDirectory, outputFileName);
+        var manifestFullPath = outputFullPath + ".tvp.json";
+        var temporaryFullPath = Path.Combine(qualityDirectory, $".{outputFileName}.{job.Id.ToString(CultureInfo.InvariantCulture)}.part");
+
+        if (!CheckDiskReserve(qualityDirectory, out var freeMessage))
+        {
+            return await BlockAsync(job, attempt, "insufficient-disk", freeMessage, cancellationToken);
+        }
+
+        job.OutputRelativePath = RelativeToLibraryRoot(outputFullPath);
+        job.ManifestRelativePath = RelativeToLibraryRoot(manifestFullPath);
+
+        // Recorded before the encoder starts: a crash mid-encode has to leave a trail to
+        // the partial file, which lives in the managed quality area rather than beside the
+        // source, so recovery can delete it instead of guessing.
+        attempt.TempRelativePath = RelativeToLibraryRoot(temporaryFullPath);
+
+        var effectiveArguments = arguments
+            .Select(argument => argument == "{output}" ? temporaryFullPath : argument)
+            .ToList();
+
+        var sourceDuration = sourceProbe.DurationMs;
+        await context.SaveChangesAsync(cancellationToken);
+
+        // Everything already charged to the cache that this encode is not producing: stored
+        // quality copies plus the reservations of other in-flight jobs. The growing
+        // temporary file has to fit in what is left, not merely stay under some multiple of
+        // its own estimate.
+        var committedBytes = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
+            + await cacheAccounting.GetReservedQualityBytesAsync(job.Id, cancellationToken);
+        var headroom = cacheLimit - committedBytes;
+
+        var overBudget = false;
+        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        FFmpegResult result;
+        try
+        {
+            result = await ffmpegAdapter.RunAsync(
+                effectiveArguments,
+                async seconds =>
+                {
+                    if (sourceDuration is > 0)
+                    {
+                        job.Progress = Math.Clamp(seconds * 1000.0 / sourceDuration.Value, 0, 1);
+                    }
+
+                    if (!overBudget && File.Exists(temporaryFullPath))
+                    {
+                        var current = new FileInfo(temporaryFullPath).Length;
+                        if (current > headroom)
+                        {
+                            // Stop the encoder now rather than letting it run to completion
+                            // and relying on eviction to clean up afterwards.
+                            overBudget = true;
+                            budgetCts.Cancel();
+                        }
+                    }
+
+                    await Task.CompletedTask;
+                },
+                budgetCts.Token);
+        }
+        catch (OperationCanceledException) when (overBudget && !cancellationToken.IsCancellationRequested)
+        {
+            result = new FFmpegResult(null, Completed: false, "Stopped because the quality cache budget was reached.", null);
+        }
+
+        await context.SaveChangesAsync(cancellationToken);
+
+        if (!result.Success || overBudget)
+        {
+            TryDeleteTemporary(temporaryFullPath);
+            job.ReservedBytes = null;
+            if (overBudget)
+            {
+                return await BlockAsync(
+                    job,
+                    attempt,
+                    "cache-full",
+                    $"The {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version did not fit in the remaining quality cache ({cacheAccounting.DescribeBytes(Math.Max(0, headroom))} free of a {cacheAccounting.DescribeBytes(cacheLimit)} limit) and was discarded. Raise the limit in settings or remove other prepared versions.",
+                    cancellationToken);
+            }
+
+            var transient = IsTransient(result.Error);
+            return await FailAsync(job, attempt, "encode-failed", result.Error ?? "The encode failed.", permanent: !transient, cancellationToken);
+        }
+
+        var tempInfo = new FileInfo(temporaryFullPath);
+        if (tempInfo.Length > headroom)
+        {
+            // One last chance to make room from cold copies before giving up on the encode.
+            await evictionService.EvictUntilUnderLimitAsync(Math.Max(0, cacheLimit - tempInfo.Length), cancellationToken);
+            committedBytes = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
+                + await cacheAccounting.GetReservedQualityBytesAsync(job.Id, cancellationToken);
+            if (committedBytes + tempInfo.Length > cacheLimit)
+            {
+                TryDeleteTemporary(temporaryFullPath);
+                job.ReservedBytes = null;
+                return await BlockAsync(
+                    job,
+                    attempt,
+                    "cache-full",
+                    $"The prepared {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version does not fit in the {cacheAccounting.DescribeBytes(cacheLimit)} quality cache and was discarded.",
+                    cancellationToken);
+            }
+        }
+
+        await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
+        var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", expectedAudioCodec, cancellationToken);
+        if (!validation.Success)
+        {
+            TryDeleteTemporary(temporaryFullPath);
+            job.ReservedBytes = null;
+            return await FailAsync(job, attempt, "invalid-output", validation.Error ?? "The prepared output failed validation.", permanent: false, cancellationToken);
+        }
+
+        await TransitionAsync(job, PreparationJobState.Publishing, cancellationToken);
+
+        var manifest = new PreparationManifest
+        {
+            JobId = job.Id,
+            LessonId = job.LessonId,
+            SourceGeneration = job.SourceGeneration,
+            RecipeVersion = QualityProfiles.RecipeVersionFor(profile!),
+            Sources = [new ManifestSource("video", video.RelativePath, fingerprint)],
+            OutputFileName = outputFileName,
+            OutputHash = validation.OutputHash,
+            OutputLengthBytes = validation.ByteLength,
+            DurationMs = validation.Probe.DurationMs,
+            Width = validation.Probe.Width,
+            Height = validation.Probe.Height,
+            VideoCodec = validation.Probe.VideoCodec,
+            AudioCodec = validation.Probe.AudioCodec,
+            State = "Prepared"
+        };
+        manifest.WriteAtomically(manifestFullPath);
+
+        File.Move(temporaryFullPath, outputFullPath, overwrite: false);
+        manifest = manifest with { State = "Committed" };
+        manifest.WriteAtomically(manifestFullPath);
+
+        job.ReservedBytes = null;
+        await PublishQualityAsync(job, outputFullPath, manifestFullPath, validation, profile!, scaledWidth, scaledHeight, cancellationToken);
+        await CompleteAttemptAsync(attempt, exitCode: 0, failure: null, temporaryFullPath, cancellationToken);
+        await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+
+        // The new copy counts against the budget; make room without touching it
+        // (it was just accessed, so LRU evicts older entries first).
+        await evictionService.EvictUntilUnderLimitAsync(cacheLimit, cancellationToken);
+
+        logger.LogInformation("Prepared {Output} ({Profile}) for lesson {LessonId}.", outputFileName, profile, job.LessonId);
+        return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
+    }
+
+    private async Task<PreparationOutcome> EncodeAndPublishAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        string videoFullPath,
+        string videoRelativePath,
+        string? companionFullPath,
+        string? companionRelativePath,
+        ProbeMetadata? probe,
+        IReadOnlyList<string> recipeArguments,
+        string recipeVersion,
+        string? expectedAudioCodec,
+        string? outputDirectoryOverride,
+        Func<string, string> outputNameFactory,
+        CancellationToken cancellationToken)
+    {
+        var fingerprint = SourceFingerprint.Compute(
+        [
+            ("video", videoRelativePath, videoFullPath),
+            .. companionRelativePath is not null && companionFullPath is not null
+                ? new[] { ("companion-audio", companionRelativePath, companionFullPath) }
+                : Array.Empty<(string, string, string)>()
+        ]);
+
+        var outputDirectory = outputDirectoryOverride ?? Path.GetDirectoryName(videoFullPath)!;
+        var outputFileName = outputNameFactory(fingerprint);
+        var outputFullPath = Path.Combine(outputDirectory, outputFileName);
+        var manifestFullPath = Path.Combine(outputDirectory, ManifestFileNameFor(outputFileName));
+        var temporaryFullPath = Path.Combine(outputDirectory, $".{outputFileName}.{job.Id.ToString(CultureInfo.InvariantCulture)}.part");
+
+        if (File.Exists(outputFullPath))
+        {
+            // A previous attempt already published a byte-identical output for this
+            // source set; adopt it instead of encoding again.
+            return await AdoptExistingOutputAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, fingerprint, sourceDurationMs: probe?.DurationMs, cancellationToken);
+        }
+
+        if (!CheckDiskReserve(outputDirectory, out var freeMessage))
+        {
+            return await BlockAsync(job, attempt, "insufficient-disk", freeMessage, cancellationToken);
+        }
+
+        job.OutputRelativePath = RelativeToLibraryRoot(outputFullPath);
+        job.ManifestRelativePath = RelativeToLibraryRoot(manifestFullPath);
+
+        var arguments = recipeArguments
+            .Select(argument => argument == "{output}" ? temporaryFullPath : argument)
+            .ToList();
+
+        var sourceDuration = probe?.DurationMs;
+        await context.SaveChangesAsync(cancellationToken);
+
+        var result = await ffmpegAdapter.RunAsync(
+            arguments,
+            async seconds =>
+            {
+                if (sourceDuration is > 0)
+                {
+                    job.Progress = Math.Clamp(seconds * 1000.0 / sourceDuration.Value, 0, 1);
+                }
+
+                await Task.CompletedTask;
+            },
+            cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+
+        if (!result.Success)
+        {
+            File.Delete(temporaryFullPath);
+            var transient = IsTransient(result.Error);
+            return await FailAsync(job, attempt, "encode-failed", result.Error ?? "The encode failed.", permanent: !transient, cancellationToken);
+        }
+
+        await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
+        var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", expectedAudioCodec, cancellationToken);
+        if (!validation.Success)
+        {
+            File.Delete(temporaryFullPath);
+            return await FailAsync(job, attempt, "invalid-output", validation.Error ?? "The prepared output failed validation.", permanent: false, cancellationToken);
+        }
+
+        await TransitionAsync(job, PreparationJobState.Publishing, cancellationToken);
+
+        var manifest = new PreparationManifest
+        {
+            JobId = job.Id,
+            LessonId = job.LessonId,
+            SourceGeneration = job.SourceGeneration,
+            RecipeVersion = recipeVersion,
+            Sources = [new ManifestSource("video", videoRelativePath, fingerprint)],
+            OutputFileName = outputFileName,
+            OutputHash = validation.OutputHash,
+            OutputLengthBytes = validation.ByteLength,
+            DurationMs = validation.Probe.DurationMs,
+            Width = validation.Probe.Width,
+            Height = validation.Probe.Height,
+            VideoCodec = validation.Probe.VideoCodec,
+            AudioCodec = validation.Probe.AudioCodec,
+            State = "Prepared"
+        };
+        manifest.WriteAtomically(manifestFullPath);
+
+        File.Move(temporaryFullPath, outputFullPath, overwrite: false);
+
+        manifest = manifest with { State = "Committed" };
+        manifest.WriteAtomically(manifestFullPath);
+
+        await PublishAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, validation, cancellationToken);
+        await CompleteAttemptAsync(attempt, exitCode: 0, failure: null, temporaryFullPath, cancellationToken);
+        await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+
+        logger.LogInformation("Prepared {Output} for lesson {LessonId}.", outputFileName, job.LessonId);
+        return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
+    }
+
+    private static string SanitizeStem(string relativePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(relativePath);
+        var builder = new global::System.Text.StringBuilder(stem.Length);
+        foreach (var character in stem)
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character is ' ' or '-' or '_' or '.' ? character : '-');
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private void TryDeleteTemporary(string temporaryFullPath)
+    {
+        try
+        {
+            File.Delete(temporaryFullPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(exception, "The partial encode {Path} could not be deleted.", temporaryFullPath);
+        }
+    }
+
+    private async Task PublishQualityAsync(
+        PreparationJobEntity job,
+        string outputFullPath,
+        string manifestFullPath,
+        OutputValidation validation,
+        string profile,
+        int scaledWidth,
+        int scaledHeight,
+        CancellationToken cancellationToken)
+    {
+        var rendition = await context.Renditions
+            .SingleOrDefaultAsync(candidate => candidate.LessonId == job.LessonId
+                && candidate.SourceGeneration == job.SourceGeneration
+                && candidate.Purpose == RenditionPurpose.Quality
+                && candidate.Profile == profile, cancellationToken);
+
+        if (rendition is null)
+        {
+            rendition = new RenditionEntity
+            {
+                LessonId = job.LessonId,
+                SourceGeneration = job.SourceGeneration,
+                Purpose = RenditionPurpose.Quality,
+                RetentionClass = RenditionRetention.Quality,
+                Profile = profile,
+                RelativePath = RelativeToLibraryRoot(outputFullPath),
+                ManifestPath = RelativeToLibraryRoot(manifestFullPath)
+            };
+            context.Renditions.Add(rendition);
+        }
+
+        rendition.Status = RenditionStatus.Ready;
+        rendition.RecipeVersion = QualityProfiles.RecipeVersionFor(profile);
+        rendition.RelativePath = RelativeToLibraryRoot(outputFullPath);
+        rendition.ManifestPath = RelativeToLibraryRoot(manifestFullPath);
+        rendition.Width = scaledWidth;
+        rendition.Height = scaledHeight;
+        rendition.VideoCodec = validation.Probe.VideoCodec;
+        rendition.AudioCodec = validation.Probe.AudioCodec;
+        rendition.ByteLength = validation.ByteLength;
+        rendition.OutputHash = validation.OutputHash;
+        rendition.LastAccessUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        rendition.Revision++;
+
+        await context.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Registers a recovered output through the publisher that matches the job's purpose.
+    /// Publishing every recovered job as a compatibility copy registered quality outputs as
+    /// Permanent with no profile, which escapes the cache budget entirely and can displace
+    /// the lesson's real compatibility rendition.
+    /// </summary>
+    private async Task<bool> TryAdoptRecoveredOutputAsync(
+        PreparationJobEntity job,
+        PreparationManifest manifest,
+        string manifestPath,
+        string outputPath,
+        OutputValidation validation,
+        CancellationToken cancellationToken)
+    {
+        if (job.Purpose == RenditionPurpose.Quality)
+        {
+            if (!QualityProfiles.IsKnown(job.Profile))
+            {
+                logger.LogWarning(
+                    "Quality job {JobId} carries the unknown profile {Profile}; its output is left for inspection.",
+                    job.Id, job.Profile ?? "(none)");
+                return false;
+            }
+
+            (manifest with { State = "Committed" }).WriteAtomically(manifestPath);
+            await PublishQualityAsync(
+                job,
+                outputPath,
+                manifestPath,
+                validation,
+                job.Profile!,
+                validation.Probe.Width ?? 0,
+                validation.Probe.Height ?? 0,
+                cancellationToken);
+            return true;
+        }
+
+        (manifest with { State = "Committed" }).WriteAtomically(manifestPath);
+        await PublishAsync(job, null, outputPath, manifestPath, manifest.OutputFileName, validation, cancellationToken);
+        return true;
+    }
+
     public async Task RecoverInterruptedAsync(CancellationToken cancellationToken)
     {
         // The install lock guarantees a single process, so any in-flight state at
@@ -300,14 +835,25 @@ public sealed class PreparationExecutor(
                 var outputPath = job.OutputRelativePath is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, job.OutputRelativePath, out var safeOutput) ? safeOutput : null;
                 var recordedTemporary = await context.PreparationAttempts.Where(a => a.JobId == job.Id && a.TempRelativePath != null)
                     .OrderByDescending(a => a.Id).Select(a => a.TempRelativePath).FirstOrDefaultAsync(cancellationToken);
-                var temporary = recordedTemporary is not null && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, recordedTemporary, out var safeTemporary)
-                    && Path.GetDirectoryName(safeTemporary) == outputDirectory
+                // Compatibility temporaries sit beside the source; quality temporaries sit in
+                // the managed quality area. Both are owned by this job and identified by its id.
+                var qualityDirectory = Path.Combine(
+                    appOptions.Value.LibraryRoot, ".tutsvideoplayer", "quality",
+                    job.LessonId.ToString(CultureInfo.InvariantCulture),
+                    job.SourceGeneration.ToString(CultureInfo.InvariantCulture));
+                var temporary = recordedTemporary is not null
+                    && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, recordedTemporary, out var safeTemporary)
+                    && (Path.GetDirectoryName(safeTemporary) == outputDirectory
+                        || Path.GetDirectoryName(safeTemporary) == Path.GetFullPath(qualityDirectory))
                     && Path.GetFileName(safeTemporary).EndsWith($".mp4.{job.Id.ToString(CultureInfo.InvariantCulture)}.part", StringComparison.Ordinal)
                         ? safeTemporary : null;
 
                 var manifest = manifestPath is not null ? PreparationManifest.TryRead(manifestPath) : null;
 
-                if (outputPath is not null)
+                // A recorded output path whose file was never renamed into place is not an
+                // unverifiable output — it is an interrupted encode, and the partial file
+                // still has to be cleaned up and the job requeued.
+                if (outputPath is not null && File.Exists(outputPath))
                 {
                     var components = new List<(string Role, string RelativePath, string AbsolutePath)> { ("video", video.RelativePath, videoFullPath) };
                     foreach (var component in job.Lesson.SourceComponents.Where(c => c.Generation == job.SourceGeneration && c.Role == SourceComponentRole.CompanionAudio))
@@ -325,10 +871,8 @@ public sealed class PreparationExecutor(
                         && PreparationArtifacts.IsVerifiedOutput(outputPath, manifest))
                     {
                         var validation = await validator.ValidateAsync(outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken);
-                        if (validation.Success)
+                        if (validation.Success && await TryAdoptRecoveredOutputAsync(job, manifest, manifestPath, outputPath, validation, cancellationToken))
                         {
-                            (manifest with { State = "Committed" }).WriteAtomically(manifestPath);
-                            await PublishAsync(job, null, outputPath, manifestPath, manifest.OutputFileName, validation, cancellationToken);
                             if (job.State is PreparationJobState.Running or PreparationJobState.Validating)
                                 await TransitionAsync(job, PreparationJobState.Interrupted, cancellationToken);
                             await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);

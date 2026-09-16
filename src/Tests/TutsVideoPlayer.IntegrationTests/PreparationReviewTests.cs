@@ -63,10 +63,19 @@ public sealed class PreparationReviewTests : IAsyncLifetime
         throw new FileNotFoundException("Video fixture not found");
     }
 
-    private PreparationExecutor Executor(long reserve = 0, string? ffmpeg = null) => new(db, Options.Create(App),
+    private (CacheAccounting Accounting, CacheEvictionService Eviction) CacheServices() =>
+        (new CacheAccounting(db, Options.Create(App)),
+         new CacheEvictionService(db, Options.Create(App), NullLogger<CacheEvictionService>.Instance));
+
+    private PreparationExecutor Executor(long reserve = 0, string? ffmpeg = null)
+    {
+        var (accounting, eviction) = CacheServices();
+        return new(db, Options.Create(App),
         Options.Create(new PreparationOptions { DiskReserveBytes = reserve }), new FFprobeAdapter("ffprobe"),
         new FFmpegAdapter(ffmpeg ?? "ffmpeg"), new PreparedOutputValidator(new FFprobeAdapter("ffprobe")),
+        accounting, eviction,
         NullLogger<PreparationExecutor>.Instance);
+    }
 
     private async Task<string> OutputAsync(bool manifestPresent = true, bool corruptHash = false)
     {
@@ -290,7 +299,7 @@ public sealed class PreparationReviewTests : IAsyncLifetime
     [Fact]
     public async Task StaleQueuePauseReturns412AndCurrentRevision()
     {
-        var controller = new PreparationsController(db) { ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext {
+        var controller = new PreparationsController(db, new TutsVideoPlayer.Web.Features.Preparation.CacheAccounting(db, Options.Create(App))) { ControllerContext = new Microsoft.AspNetCore.Mvc.ControllerContext {
             HttpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext() } };
         controller.Request.Headers.IfMatch = "\"999\"";
         var response = await controller.SetQueuePaused(new TutsVideoPlayer.Web.Models.QueuePauseModel(true), Token);
@@ -306,9 +315,12 @@ public sealed class PreparationReviewTests : IAsyncLifetime
         Directory.CreateSymbolicLink(alias, root);
         try
         {
-            var executor = new PreparationExecutor(db, Options.Create(new AppOptions { LibraryRoot = alias, DataDirectory = root }),
+            var appOptions = new AppOptions { LibraryRoot = alias, DataDirectory = root };
+            var accounting = new CacheAccounting(db, Options.Create(appOptions));
+            var eviction = new CacheEvictionService(db, Options.Create(appOptions), NullLogger<CacheEvictionService>.Instance);
+            var executor = new PreparationExecutor(db, Options.Create(appOptions),
                 Options.Create(new PreparationOptions { DiskReserveBytes = 0 }), new FFprobeAdapter("ffprobe"), new FFmpegAdapter("ffmpeg"),
-                new PreparedOutputValidator(new FFprobeAdapter("ffprobe")), NullLogger<PreparationExecutor>.Instance);
+                new PreparedOutputValidator(new FFprobeAdapter("ffprobe")), accounting, eviction, NullLogger<PreparationExecutor>.Instance);
             var outcome = await executor.ExecuteAsync(job.Id, Token);
             Assert.Equal(PreparationJobState.Succeeded, outcome.FinalState);
             var rendition = await db.Renditions.SingleAsync(Token);
