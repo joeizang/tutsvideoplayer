@@ -25,8 +25,18 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
             ? preparingJob.userMessage ?? "Preparation is not possible for this lesson right now."
             : "Preparing this lesson for playback.";
 
+    // Polling follows the preparation, not playability. In the ordinary case the original
+    // is already playable while a better quality is still encoding, and stopping here left
+    // the finished version invisible until a manual reload. The manifest is swapped in
+    // place: the player keeps its current rendition and session, and the new one simply
+    // appears in the quality menu.
+    const preparingJobId = preparingJob?.preparationJobId ?? null;
+    const preparationActive = preparingJobId !== null
+        && (preparingJob!.state === "Queued" || preparingJob!.state === "Running"
+            || preparingJob!.state === "Validating" || preparingJob!.state === "Publishing");
+
     useEffect(() => {
-        if (playable || missing || !preparingJob) {
+        if (missing || !preparationActive) {
             return;
         }
 
@@ -34,11 +44,7 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
             try {
                 const response = await fetch(`/api/v1/lessons/${lesson.id}/playback`);
                 if (response.ok) {
-                    const updated = await response.json();
-                    setManifest(updated);
-                    if (updated.readyDefaultRenditionId != null) {
-                        window.location.reload();
-                    }
+                    setManifest(await response.json());
                 }
             } catch {
                 return;
@@ -46,7 +52,7 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
         }, 2000);
 
         return () => window.clearInterval(timer);
-    }, [playable, missing, preparingJob, lesson.id]);
+    }, [missing, preparationActive, preparingJobId, lesson.id]);
 
     return (
         <main className="flex min-h-screen flex-col bg-canvas text-ink dark:bg-neutral-900 dark:text-neutral-100">

@@ -5,6 +5,17 @@ namespace TutsVideoPlayer.Infrastructure.Catalog;
 
 public static class PreparationArtifacts
 {
+    /// <summary>The managed quality cache lives here and nowhere else.</summary>
+    public const string QualityAreaPrefix = ".tutsvideoplayer/quality/";
+
+    /// <summary>
+    /// True when a library-relative path addresses the managed quality area. Cache cleanup
+    /// deletes files, so it is confined to the directory this application owns rather than
+    /// trusting whatever path a catalog row happens to carry.
+    /// </summary>
+    public static bool IsInsideQualityArea(string relativePath) =>
+        relativePath.Replace('\\', '/').StartsWith(QualityAreaPrefix, StringComparison.Ordinal);
+
     public static bool IsVerifiedOutput(string path, PreparationManifest manifest)
     {
         try

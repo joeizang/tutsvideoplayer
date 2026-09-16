@@ -32,8 +32,17 @@ public sealed class CacheAccounting(AppDbContext context, IOptions<AppOptions> a
     }
 
     /// <summary>
-    /// Ready quality bytes: the chargeable, evictable content under the budget.
+    /// Chargeable quality bytes: everything whose file is still on disk and therefore still
+    /// costs the user space. Stale copies — superseded by a source change — are included:
+    /// excluding them hid real bytes from the budget while leaving the files behind.
     /// </summary>
+    public async Task<long> GetChargeableQualityBytesAsync(CancellationToken cancellationToken = default) =>
+        await context.Renditions.AsNoTracking()
+            .Where(rendition => rendition.RetentionClass == RenditionRetention.Quality
+                && (rendition.Status == RenditionStatus.Ready || rendition.Status == RenditionStatus.Stale))
+            .SumAsync(rendition => rendition.ByteLength, cancellationToken);
+
+    /// <summary>Ready-only bytes, for reporting what is actually playable.</summary>
     public async Task<long> GetReadyQualityBytesAsync(CancellationToken cancellationToken = default) =>
         await context.Renditions.AsNoTracking()
             .Where(rendition => rendition.RetentionClass == RenditionRetention.Quality
@@ -41,10 +50,16 @@ public sealed class CacheAccounting(AppDbContext context, IOptions<AppOptions> a
             .SumAsync(rendition => rendition.ByteLength, cancellationToken);
 
     /// <summary>
-    /// Reserved bytes for in-flight quality work: the larger of the recorded
-    /// reservation and the current temporary file size, per attempt.
+    /// Reserved bytes for in-flight quality work: per job, the larger of the recorded
+    /// reservation and the partial file actually on disk. The growing file is the attempt's
+    /// temporary <c>.part</c>, not the final output path — that path does not exist until
+    /// the encode is renamed into place, so measuring it always reported zero.
     /// </summary>
-    public async Task<long> GetReservedQualityBytesAsync(CancellationToken cancellationToken = default)
+    /// <param name="excludingJobId">
+    /// Omits one job, so a running encode can measure what everything <em>else</em> has
+    /// already claimed without counting its own reservation twice.
+    /// </param>
+    public async Task<long> GetReservedQualityBytesAsync(long? excludingJobId, CancellationToken cancellationToken = default)
     {
         var activeJobs = await context.PreparationJobs.AsNoTracking()
             .Where(job => job.Purpose == RenditionPurpose.Quality
@@ -52,29 +67,50 @@ public sealed class CacheAccounting(AppDbContext context, IOptions<AppOptions> a
                     || job.State == PreparationJobState.Running
                     || job.State == PreparationJobState.Validating
                     || job.State == PreparationJobState.Publishing))
-            .Select(job => new { job.Id, job.ReservedBytes, job.OutputRelativePath })
+            .Where(job => excludingJobId == null || job.Id != excludingJobId)
+            .Select(job => new
+            {
+                job.Id,
+                job.ReservedBytes,
+                TempRelativePath = context.PreparationAttempts
+                    .Where(attempt => attempt.JobId == job.Id && attempt.TempRelativePath != null)
+                    .OrderByDescending(attempt => attempt.Id)
+                    .Select(attempt => attempt.TempRelativePath)
+                    .FirstOrDefault()
+            })
             .ToListAsync(cancellationToken);
 
         long total = 0;
         foreach (var job in activeJobs)
         {
-            var current = 0L;
-            if (job.OutputRelativePath is not null)
-            {
-                var absolute = Path.IsPathRooted(job.OutputRelativePath)
-                    ? job.OutputRelativePath
-                    : Path.Combine(appOptions.Value.LibraryRoot, job.OutputRelativePath);
-                var info = new FileInfo(absolute);
-                if (info.Exists)
-                {
-                    current = info.Length;
-                }
-            }
-
-            total += Math.Max(job.ReservedBytes ?? 0, current);
+            total += Math.Max(job.ReservedBytes ?? 0, MeasureFile(job.TempRelativePath));
         }
 
         return total;
+    }
+
+    public Task<long> GetReservedQualityBytesAsync(CancellationToken cancellationToken = default) =>
+        GetReservedQualityBytesAsync(null, cancellationToken);
+
+    private long MeasureFile(string? relativePath)
+    {
+        if (relativePath is null)
+        {
+            return 0;
+        }
+
+        try
+        {
+            var absolute = Path.IsPathRooted(relativePath)
+                ? relativePath
+                : Path.Combine(appOptions.Value.LibraryRoot, relativePath);
+            var info = new FileInfo(absolute);
+            return info.Exists ? info.Length : 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
     }
 
     public async Task<StorageSummaryModel> GetStorageSummaryAsync(CancellationToken cancellationToken = default)
@@ -84,11 +120,7 @@ public sealed class CacheAccounting(AppDbContext context, IOptions<AppOptions> a
                 && rendition.Status == RenditionStatus.Ready)
             .SumAsync(rendition => rendition.ByteLength, cancellationToken);
 
-        var qualityReady = await context.Renditions.AsNoTracking()
-            .Where(rendition => rendition.RetentionClass == RenditionRetention.Quality
-                && rendition.Status == RenditionStatus.Ready)
-            .SumAsync(rendition => rendition.ByteLength, cancellationToken);
-
+        var qualityReady = await GetChargeableQualityBytesAsync(cancellationToken);
         var reserved = await GetReservedQualityBytesAsync(cancellationToken);
         var limit = await GetCacheLimitAsync(cancellationToken);
         var available = GetAvailableDiskBytes();
