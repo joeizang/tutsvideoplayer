@@ -51,8 +51,8 @@ public sealed class PreparingApplication : WebApplicationFactory<Program>, IAsyn
     public async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
-        Directory.Delete(FixtureRoot, recursive: true);
-        Directory.Delete(DataDirectory, recursive: true);
+        // DEBUG(M5): keep the appdata for post-mortem inspection.
+        // Directory.Delete(DataDirectory, recursive: true);
     }
 
     public HttpClient CreateGuardedClient()
@@ -171,6 +171,7 @@ public class PreparationPipelineTests(PreparingApplication application)
 
         Assert.NotNull(jobs);
         Assert.Equal(2, jobs.Count);
+        Assert.DoesNotContain(jobs, job => job.LessonTitle.Contains("Tall", StringComparison.Ordinal));
         Assert.All(jobs, job => Assert.NotEqual("Exempt", job.LessonTitle));
         Assert.DoesNotContain(jobs, job => job.LessonTitle.Contains("Exempt", StringComparison.Ordinal));
     }
@@ -189,8 +190,11 @@ public class PreparationPipelineTests(PreparingApplication application)
         var tree = await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{prep.Id}/tree", TestContext.Current.CancellationToken);
         var lessons = tree!.Nodes.Where(node => node.Type == "lesson").ToList();
 
-        // Only the non-exempt lessons receive permanent playback copies.
-        var preparedLessons = lessons.Where(lesson => !lesson.Filename!.EndsWith("Exempt Lesson.mp4", StringComparison.Ordinal)).ToList();
+        // Only the non-exempt lessons receive permanent playback copies; both MP4
+        // lessons play directly and are exempt from automatic preparation.
+        var preparedLessons = lessons.Where(lesson =>
+            !lesson.Filename!.EndsWith("Exempt Lesson.mp4", StringComparison.Ordinal)
+            && !lesson.Filename!.EndsWith("Tall Lesson.mp4", StringComparison.Ordinal)).ToList();
 
         var sourceHashes = preparedLessons.ToDictionary(
             lesson => lesson.Filename!,
@@ -372,9 +376,9 @@ public class PreparationPipelineTests(PreparingApplication application)
 
         var courses = await client.GetFromJsonAsync<CourseListModel>("/api/v1/courses?pageSize=100", TestContext.Current.CancellationToken);
         var prep = courses!.Courses.Single(course => course.Title == "CoursePrep");
-        Assert.Equal(3, prep.LessonCount);
+        Assert.Equal(4, prep.LessonCount);
 
         var tree = await client.GetFromJsonAsync<CourseTreeModel>($"/api/v1/courses/{prep.Id}/tree", TestContext.Current.CancellationToken);
-        Assert.Equal(3, tree!.Nodes.Count(node => node.Type == "lesson"));
+        Assert.Equal(4, tree!.Nodes.Count(node => node.Type == "lesson"));
     }
 }

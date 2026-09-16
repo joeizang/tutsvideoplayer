@@ -20,6 +20,7 @@ public sealed class PreparationJobEntity
     public string? LeaseOwner { get; set; }
     public long? LeaseExpiresUtcMs { get; set; }
     public double? Progress { get; set; }
+    public long? ReservedBytes { get; set; }
     public string? ErrorCode { get; set; }
     public string? UserMessage { get; set; }
     public string? OutputRelativePath { get; set; }

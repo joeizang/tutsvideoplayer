@@ -64,6 +64,12 @@ public static class PreparationFixtureBuilder
             "-c:a", "aac", "-b:a", "64k", "-shortest",
             Path.Combine(course, "03 Exempt Lesson.mp4"));
 
+        RunFFmpeg("-f", "lavfi", "-i", "testsrc2=duration=1:size=1920x1080:rate=12",
+            "-f", "lavfi", "-i", "sine=frequency=770:duration=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "64k", "-shortest",
+            Path.Combine(course, "04 Tall Lesson.mp4"));
+
         return rootDirectory;
     }
 

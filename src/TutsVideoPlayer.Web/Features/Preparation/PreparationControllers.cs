@@ -7,6 +7,7 @@ using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
 using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Web.Features.Learning;
+using TutsVideoPlayer.Web.Features.Preparation;
 using TutsVideoPlayer.Web.Hosting;
 using TutsVideoPlayer.Web.Models;
 
@@ -17,7 +18,7 @@ namespace TutsVideoPlayer.Web.Features.Preparation;
 public sealed class LessonPreparationsController(AppDbContext context) : ControllerBase
 {
     [HttpPost]
-    public async Task<ActionResult<PreparationJobModel>> Create(
+    public async Task<IActionResult> Create(
         long lessonId,
         [FromBody] PreparationRequestModel? request,
         CancellationToken cancellationToken)
@@ -29,15 +30,19 @@ public sealed class LessonPreparationsController(AppDbContext context) : Control
             return NotFound();
         }
 
-        var purpose = request?.Purpose is null or "Compatibility" or "compatibility"
-            ? RenditionPurpose.Compatibility
-            : RenditionPurpose.Quality;
-        if (purpose == RenditionPurpose.Quality)
+        if (request?.Purpose is not null
+            && !request.Purpose.Equals("Compatibility", StringComparison.OrdinalIgnoreCase)
+            && !request.Purpose.Equals("Quality", StringComparison.OrdinalIgnoreCase))
         {
             return Problem(
-                statusCode: StatusCodes.Status422UnprocessableEntity,
-                title: "Quality preparation not yet available",
-                detail: "Quality versions arrive in milestone 5; compatibility preparation is available now.");
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Unknown preparation purpose",
+                detail: "Purpose must be Compatibility or Quality.");
+        }
+
+        if (request is not null && request.Purpose.Equals("Quality", StringComparison.OrdinalIgnoreCase))
+        {
+            return await CreateQuality(lessonId, request, cancellationToken);
         }
 
         var dedupKey = PreparationScheduler.DedupKeyFor(lessonId, lesson.SourceGeneration);
@@ -64,6 +69,67 @@ public sealed class LessonPreparationsController(AppDbContext context) : Control
         return Accepted(ToModel(job, lesson.Title));
     }
 
+    private async Task<IActionResult> CreateQuality(
+        long lessonId,
+        PreparationRequestModel request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Profile))
+        {
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Quality profile required",
+                detail: "A quality preparation requires a profile (1080, 720, or 480).");
+        }
+
+        var outcome = await QualityScheduling.QueueQualityForLessonAsync(context, lessonId, request.Profile, cancellationToken);
+        if (outcome.BlockedReason == "unknown-profile")
+        {
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Unknown quality profile",
+                detail: "Profile must be 1080, 720, or 480.");
+        }
+
+        if (outcome.BlockedReason == "lesson-unavailable")
+        {
+            return NotFound();
+        }
+
+        if (outcome.BlockedReason == "probe-incomplete")
+        {
+            return Problem(
+                statusCode: StatusCodes.Status422UnprocessableEntity,
+                title: "Source dimensions unknown",
+                detail: "The source has not been probed yet, so no quality version can be prepared.");
+        }
+
+        if (outcome.BlockedReason == "not-eligible")
+        {
+            return Problem(
+                statusCode: StatusCodes.Status422UnprocessableEntity,
+                title: "Quality profile not eligible",
+                detail: "This profile would upscale the source or duplicate its native rendition; the existing rendition already provides this quality.");
+        }
+
+        if (outcome.AlreadyReady)
+        {
+            return Ok(new { status = "already-prepared", profile = request.Profile });
+        }
+
+        var job = outcome.JobId.HasValue
+            ? await context.PreparationJobs.AsNoTracking()
+                .Include(candidate => candidate.Lesson)
+                .SingleOrDefaultAsync(candidate => candidate.Id == outcome.JobId.Value, cancellationToken)
+            : null;
+        if (job is null)
+        {
+            return NotFound();
+        }
+
+        return Accepted(ToModel(job, job.Lesson.Title));
+    }
+
     internal static PreparationJobModel ToModel(PreparationJobEntity job, string lessonTitle) => new(
         job.Id.ToString(CultureInfo.InvariantCulture),
         job.LessonId.ToString(CultureInfo.InvariantCulture),
@@ -79,8 +145,72 @@ public sealed class LessonPreparationsController(AppDbContext context) : Control
 }
 
 [ApiController]
+[Route("api/v1/courses/{courseId:long}/preparations")]
+public sealed class CoursePreparationsController(AppDbContext context) : ControllerBase
+{
+    public sealed record CourseQualityRequest(string Profile);
+
+    [HttpPost]
+    public async Task<IActionResult> CreateCourseQuality(
+        long courseId,
+        [FromBody] CourseQualityRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!QualityProfiles.IsKnown(request.Profile))
+        {
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Unknown quality profile",
+                detail: "Profile must be 1080, 720, or 480.");
+        }
+
+        var course = await context.Courses.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == courseId, cancellationToken);
+        if (course is null)
+        {
+            return NotFound();
+        }
+
+        var lessonIds = await context.Lessons.AsNoTracking()
+            .Where(lesson => lesson.CourseId == courseId && lesson.Availability == CatalogAvailability.Available)
+            .OrderBy(lesson => lesson.SortKey)
+            .Select(lesson => lesson.Id)
+            .ToListAsync(cancellationToken);
+
+        var queued = 0;
+        var alreadyReady = 0;
+        var notEligible = 0;
+        foreach (var lessonId in lessonIds)
+        {
+            var outcome = await QualityScheduling.QueueQualityForLessonAsync(context, lessonId, request.Profile, cancellationToken);
+            if (outcome.Created)
+            {
+                queued++;
+            }
+            else if (outcome.AlreadyReady)
+            {
+                alreadyReady++;
+            }
+            else if (outcome.BlockedReason == "not-eligible")
+            {
+                notEligible++;
+            }
+        }
+
+        return Accepted(new
+        {
+            courseId = courseId.ToString(CultureInfo.InvariantCulture),
+            profile = request.Profile.ToLowerInvariant(),
+            queued,
+            alreadyReady,
+            notEligible
+        });
+    }
+}
+
+[ApiController]
 [Route("api/v1/preparations")]
-public sealed class PreparationsController(AppDbContext context) : ControllerBase
+public sealed class PreparationsController(AppDbContext context, CacheAccounting cacheAccounting) : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<PreparationJobModel>>> List(
@@ -209,6 +339,22 @@ public sealed class PreparationsController(AppDbContext context) : ControllerBas
 
         RevisionResponses.SetETag(Response, preferences.Revision);
         return Ok(new { paused = preferences.QueuePaused, revision = preferences.Revision });
+    }
+
+    [HttpGet("/api/v1/storage")]
+    public async Task<IActionResult> GetStorage(CancellationToken cancellationToken)
+    {
+        var summary = await cacheAccounting.GetStorageSummaryAsync(cancellationToken);
+        return Ok(new
+        {
+            permanentBytes = summary.PermanentBytes,
+            qualityReadyBytes = summary.QualityReadyBytes,
+            qualityReservedBytes = summary.QualityReservedBytes,
+            qualityProtectedBytes = summary.QualityProtectedBytes,
+            cacheLimitBytes = summary.CacheLimitBytes,
+            availableDiskBytes = summary.AvailableDiskBytes,
+            pendingCleanupBytes = summary.PendingCleanupBytes
+        });
     }
 
     [HttpGet("queue")]
