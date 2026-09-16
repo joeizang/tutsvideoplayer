@@ -4,9 +4,11 @@ This is a specification for the later implementation. No commands here have been
 
 ## Configuration contract
 
+`App:LibraryRoot` defaults to `~/LEARNING-VIDEOS`. Both `~/` paths and plain relative paths resolve against the home directory of the account running the application, independently of its working directory. Absolute overrides (including `App__LibraryRoot=/library` for Docker) remain supported. Restart the application after changing this setting.
+
 | Setting | Initial default / requirement | Change mechanism |
 | --- | --- | --- |
-| Library root | `/Users/josephizang/LEARNING-VIDEOS` for this Mac; `/library` inside Docker | Host configuration, restart and validation |
+| Library root | `~/LEARNING-VIDEOS` in the current user's home directory; `/library` inside Docker | Host configuration, restart and validation |
 | Application data | Dedicated local writable directory; `/data` in Docker | Host configuration |
 | Listen address | Loopback by default; explicit LAN address for server | Host configuration |
 | Allowed hosts/origins | Exact localhost names/ports or explicitly configured LAN name/address | Host configuration |
