@@ -8,6 +8,62 @@
     --color-action: #245fc7;
     --color-completion: #23664c;
     --color-danger: #a4262c;
+
+    /*
+     * The default Tailwind neutral scale is true gray (zero chroma). Retinted to a cool
+     * slate so dark mode reads as one navy-tinted system tied to --color-ink, rather than
+     * generic gray with an unrelated blue accent dropped on top.
+     */
+    --color-neutral-100: oklch(96.8% 0.007 247.896);
+    --color-neutral-200: oklch(92.9% 0.013 255.508);
+    --color-neutral-300: oklch(86.9% 0.022 252.894);
+    --color-neutral-400: oklch(70.4% 0.04 256.788);
+    --color-neutral-600: oklch(44.6% 0.043 257.281);
+    --color-neutral-700: oklch(37.2% 0.044 257.287);
+    --color-neutral-800: oklch(27.9% 0.041 260.031);
+    --color-neutral-900: oklch(20.8% 0.042 265.755);
 }
 
 @source "../**/*.{tsx,ts}";
+
+/*
+ * html/body never got a background of their own, so on any viewport wider than the
+ * centered max-w-5xl <main>, the browser default (white) showed through as columns on
+ * either side of the dark content. Matching them to the same tokens the page uses closes
+ * that gap; the dark-mode override brightens the accent so links/buttons keep enough
+ * contrast against the darker slate background.
+ */
+html,
+body {
+    background-color: var(--color-canvas);
+}
+
+@media (prefers-color-scheme: dark) {
+    html,
+    body {
+        background-color: var(--color-neutral-900);
+        background-image: radial-gradient(ellipse 1200px 600px at 50% -10%, color-mix(in oklab, var(--color-action) 16%, transparent), transparent);
+        background-repeat: no-repeat;
+    }
+
+    :root {
+        --color-action: #5b9dfa;
+    }
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible {
+    outline: 2px solid var(--color-action);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
