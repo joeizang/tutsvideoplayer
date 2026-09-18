@@ -40,7 +40,7 @@ public sealed class LessonPreparationsController(AppDbContext context) : Control
                 detail: "Purpose must be Compatibility or Quality.");
         }
 
-        if (request is not null && request.Purpose.Equals("Quality", StringComparison.OrdinalIgnoreCase))
+        if (request is not null && request.Purpose is not null && request.Purpose.Equals("Quality", StringComparison.OrdinalIgnoreCase))
         {
             return await CreateQuality(lessonId, request, cancellationToken);
         }

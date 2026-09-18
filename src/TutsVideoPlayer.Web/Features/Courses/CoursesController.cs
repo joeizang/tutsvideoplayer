@@ -30,6 +30,10 @@ public sealed class CoursesController(AppDbContext context) : ControllerBase
 
         var totalCount = await courses.CountAsync(cancellationToken);
 
+        // Every per-lesson count below stays inside this one statement: the completion check is an
+        // EXISTS against the LessonProgress primary key (LessonId, SourceGeneration), so it costs a
+        // seek, not a round trip. Materialising lessons and joining progress in memory would read
+        // the same rows over two extra commands and scan them linearly.
         var items = await courses
             .OrderBy(course => course.SortKey)
             .ThenBy(course => course.Id)
@@ -76,6 +80,8 @@ public sealed class CoursesController(AppDbContext context) : ControllerBase
                 null))
             .ToListAsync(cancellationToken);
 
+        // As in GetCourses: the completion flag is an EXISTS on the LessonProgress primary key,
+        // resolved within this statement rather than by a second command.
         var lessons = await context.Lessons.AsNoTracking()
             .Where(lesson => lesson.CourseId == courseId)
             .OrderBy(lesson => lesson.SortKey)

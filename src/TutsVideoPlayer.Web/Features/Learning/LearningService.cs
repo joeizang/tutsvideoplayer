@@ -4,13 +4,13 @@ using Microsoft.Data.Sqlite;
 using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Core.Learning;
-using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Catalog;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Infrastructure.Persistence.Entities;
 using TutsVideoPlayer.Web.Models;
 using TutsVideoPlayer.Web.Features.Preparation;
 using TutsVideoPlayer.Web.Features.Subtitles;
+using ZLinq;
 
 namespace TutsVideoPlayer.Web.Features.Learning;
 
@@ -445,7 +445,7 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
         var continueEntries = new List<ContinueLearningEntryModel>();
         var seenCourses = new HashSet<long>();
         var courseIds = rows.Select(row => row.CourseId).Distinct().ToList();
-        var courseLessons = await context.Lessons.AsNoTracking()
+        var courseLessons = await context.Lessons.AsNoTracking().Include(lesson => lesson.Course)
             .Where(lesson => courseIds.Contains(lesson.CourseId) && lesson.Availability == CatalogAvailability.Available)
             .OrderBy(lesson => lesson.SortKey)
             .ThenBy(lesson => lesson.Id)
@@ -468,7 +468,7 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                 continue;
             }
 
-            var lessons = courseLessons.Where(lesson => lesson.CourseId == row.CourseId).ToList();
+            var lessons = courseLessons.AsValueEnumerable().Where(lesson => lesson.CourseId == row.CourseId).ToList();
             var effectivelyComplete = CompletionResolver.IsEffectivelyComplete(row.AutomaticCompleted, row.ManualCompletion);
 
             string recommendedLessonId;
@@ -522,8 +522,8 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
                 row.LessonTitle,
                 row.PositionMs,
                 row.LessonDurationMs,
-                lessons.Count(lesson => lesson.Completed),
-                lessons.Count,
+                lessons.AsValueEnumerable().Count(lesson => lesson.Completed),
+                lessons.AsValueEnumerable().Count(lesson => !lesson.Completed),
                 recommendedLessonId,
                 recommendation,
                 row.LessonAvailable,

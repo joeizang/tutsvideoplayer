@@ -8,6 +8,7 @@ using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Learning;
 using TutsVideoPlayer.Web.Models;
+using ZLinq;
 
 namespace TutsVideoPlayer.Web.Features.Home;
 
@@ -38,7 +39,7 @@ public sealed class HomeController(AppDbContext context, LearningService learnin
             .OrderByDescending(run => run.Id)
             .FirstOrDefaultAsync(cancellationToken);
 
-        var coursesQuery = context.Courses.AsNoTracking().AsQueryable();
+        var coursesQuery = context.Courses.AsNoTracking();
         var searchQuery = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
         if (searchQuery is not null)
         {
@@ -53,24 +54,52 @@ public sealed class HomeController(AppDbContext context, LearningService learnin
         var lastPage = Math.Max(1, (int)Math.Ceiling(matchingCourseCount / (double)effectivePageSize));
         page = Math.Min(page, lastPage);
 
-        var courses = await coursesQuery
+        // var coursesQuery = context.Courses.AsNoTracking().AsQueryable();
+        // var searchQuery = string.IsNullOrWhiteSpace(q) ? null : q.Trim();
+        if (searchQuery is not null)
+        {
+            var pattern = $"%{Features.Courses.CoursesController.EscapeLike(searchQuery)}%";
+            coursesQuery = coursesQuery.Where(course => EF.Functions.Like(course.SearchTitle, pattern, "\\")
+                || course.Lessons.Any(lesson => EF.Functions.Like(lesson.SearchTitle, pattern, "\\")));
+        }
+
+        // LIB-07 requires the course list to stay complete as folders are added, so the
+        // page size is a page boundary rather than a silent cap on what can be browsed.
+        // var matchingCourseCount = await coursesQuery.CountAsync(cancellationToken);
+        // var lastPage = Math.Max(1, (int)Math.Ceiling(matchingCourseCount / (double)effectivePageSize));
+        page = Math.Min(page, lastPage);
+
+        var courseItems = await coursesQuery.Include(course => course.Lessons)
             .OrderBy(course => course.SortKey)
             .ThenBy(course => course.Id)
             .Skip((page - 1) * effectivePageSize)
             .Take(effectivePageSize)
-            .Select(course => new CourseSummaryModel(
-                course.Id.ToString(CultureInfo.InvariantCulture),
-                course.DisplayTitle,
-                course.Lessons.Count(),
-                course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available),
-                course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Missing),
-                course.Lessons.Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available
-                    && context.LessonProgress.Any(progress => progress.LessonId == lesson.Id
-                        && progress.SourceGeneration == lesson.SourceGeneration
-                        && (progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
-                            || (progress.ManualCompletion == null && progress.AutomaticCompleted)))),
-                course.Availability == Core.Catalog.CatalogAvailability.Available))
             .ToListAsync(cancellationToken);
+
+        var allLessonIds = courseItems.AsValueEnumerable().SelectMany(course => course.Lessons).Select(lesson => lesson.Id).Distinct().ToList();
+        var lessonProgress = await context.LessonProgress.AsNoTracking()
+            .Where(progress => allLessonIds.Contains(progress.LessonId))
+            .Select(progress => new
+            {
+                progress.LessonId,
+                progress.SourceGeneration,
+                Completed = progress.ManualCompletion == TutsVideoPlayer.Core.Learning.CompletionChoice.Completed
+                    || (progress.ManualCompletion == null && progress.AutomaticCompleted)
+            })
+            .ToListAsync(cancellationToken);
+
+        var courses = courseItems.AsValueEnumerable().Select(course => new CourseSummaryModel(
+            course.Id.ToString(CultureInfo.InvariantCulture),
+            course.DisplayTitle,
+            course.Lessons.AsValueEnumerable().Count(),
+            course.Lessons.AsValueEnumerable().Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available),
+            course.Lessons.AsValueEnumerable().Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Missing),
+            course.Lessons.AsValueEnumerable().Count(lesson => lesson.Availability == Core.Catalog.CatalogAvailability.Available
+                && lessonProgress.Any(progress => progress.LessonId == lesson.Id
+                    && progress.SourceGeneration == lesson.SourceGeneration
+                    && progress.Completed)),
+            course.Availability == Core.Catalog.CatalogAvailability.Available))
+            .ToList();
 
         var continueEntries = await learning.ContinueLearningAsync(5, cancellationToken);
         var queue = await BuildQueueSummaryAsync(cancellationToken);
@@ -81,8 +110,8 @@ public sealed class HomeController(AppDbContext context, LearningService learnin
                 library?.LogicalIdentity ?? string.Empty,
                 library?.CatalogRevision ?? 0,
                 courseCount,
-                lessonCounts.FirstOrDefault(group => group.Key == Core.Catalog.CatalogAvailability.Available)?.Count ?? 0,
-                lessonCounts.FirstOrDefault(group => group.Key == Core.Catalog.CatalogAvailability.Missing)?.Count ?? 0,
+                lessonCounts.AsValueEnumerable().FirstOrDefault(group => group.Key == Core.Catalog.CatalogAvailability.Available)?.Count ?? 0,
+                lessonCounts.AsValueEnumerable().FirstOrDefault(group => group.Key == Core.Catalog.CatalogAvailability.Missing)?.Count ?? 0,
                 subtitleCount,
                 latest is null
                     ? null

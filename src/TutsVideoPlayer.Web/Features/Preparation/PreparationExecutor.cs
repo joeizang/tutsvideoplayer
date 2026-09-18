@@ -86,12 +86,10 @@ public sealed class PreparationExecutor(
                 return await ExecuteQualityAsync(
                     job,
                     attempt,
-                    new SourceSetInfo(video.RelativePath, videoFullPath, companion?.RelativePath, companionFullPath, null),
                     videoFullPath,
                     video,
                     companionFullPath,
                     companion,
-                    null,
                     cancellationToken);
             }
 
@@ -280,21 +278,125 @@ public sealed class PreparationExecutor(
         }
     }
 
+    /// <summary>
+    /// What the eligibility checks established about a quality job: the profile is known, the
+    /// source really was measured, and the requested height is genuinely below the source's.
+    /// Everything downstream reads dimensions and duration from here rather than re-probing.
+    /// </summary>
+    private sealed record QualityPlan(
+        string Profile,
+        ProbeMetadata SourceProbe,
+        int SourceWidth,
+        int SourceHeight,
+        int ScaledWidth,
+        int ScaledHeight)
+    {
+        /// <summary>How this version is named to the reader, e.g. "720p".</summary>
+        public string Label => QualityProfiles.LabelFor(Profile, SourceWidth, SourceHeight);
+    }
+
+    /// <summary>
+    /// The encoder invocation plus the three paths the publication protocol moves between:
+    /// the temporary file being written, the output it is renamed to, and the manifest that
+    /// records the rename.
+    /// </summary>
+    private sealed record QualityRecipe(
+        IReadOnlyList<string> Arguments,
+        string? ExpectedAudioCodec,
+        string Fingerprint,
+        string VideoRelativePath,
+        string OutputDirectory,
+        string OutputFileName,
+        string OutputFullPath,
+        string ManifestFullPath,
+        string TemporaryFullPath);
+
+    /// <summary>
+    /// How the encode ended, and the budget it was held to. <paramref name="Headroom" /> is
+    /// the cache space the temporary file was allowed to occupy while running.
+    /// </summary>
+    private sealed record QualityEncodeResult(
+        FFmpegResult Result,
+        bool OverBudget,
+        long Headroom,
+        long CacheLimit);
+
+    /// <summary>
+    /// Prepares a lower-quality rendition: decide eligibility, adopt any copy that is already
+    /// there, reserve cache space, encode, settle the result against the budget, publish.
+    /// Each step either returns a terminal outcome or hands the next one what it needs.
+    /// </summary>
     private async Task<PreparationOutcome> ExecuteQualityAsync(
         PreparationJobEntity job,
         PreparationAttemptEntity attempt,
-        SourceSetInfo sourceSet,
         string videoFullPath,
         SourceComponentEntity video,
         string? companionFullPath,
         SourceComponentEntity? companion,
-        ProbeMetadata? probe,
+        CancellationToken cancellationToken)
+    {
+        var resolved = await ResolveQualityPlanAsync(job, attempt, videoFullPath, cancellationToken);
+        if (resolved.Plan is not { } plan)
+        {
+            // Rejected is always set when Plan is not: the job has been failed with a reason.
+            return resolved.Rejected!;
+        }
+
+        var adopted = await TryAdoptReadyQualityRenditionAsync(job, attempt, plan, cancellationToken);
+        if (adopted is not null)
+        {
+            return adopted;
+        }
+
+        var (cacheLimit, blocked) = await ReserveCacheBudgetAsync(job, attempt, plan, videoFullPath, cancellationToken);
+        if (blocked is not null)
+        {
+            return blocked;
+        }
+
+        var recipe = BuildQualityRecipe(job, plan, videoFullPath, video, companionFullPath, companion);
+        Directory.CreateDirectory(recipe.OutputDirectory);
+        if (!CheckDiskReserve(recipe.OutputDirectory, out var freeMessage))
+        {
+            return await BlockAsync(job, attempt, "insufficient-disk", freeMessage, cancellationToken);
+        }
+
+        job.OutputRelativePath = RelativeToLibraryRoot(recipe.OutputFullPath);
+        job.ManifestRelativePath = RelativeToLibraryRoot(recipe.ManifestFullPath);
+
+        // Recorded before the encoder starts: a crash mid-encode has to leave a trail to
+        // the partial file, which lives in the managed quality area rather than beside the
+        // source, so recovery can delete it instead of guessing.
+        attempt.TempRelativePath = RelativeToLibraryRoot(recipe.TemporaryFullPath);
+        await context.SaveChangesAsync(cancellationToken);
+
+        var encode = await RunQualityEncodeAsync(job, recipe, plan.SourceProbe.DurationMs, cacheLimit, cancellationToken);
+
+        var settled = await SettleQualityEncodeAsync(job, attempt, plan, recipe, encode, cancellationToken);
+        if (settled.Validation is not { } validation)
+        {
+            // Stopped is always set when Validation is not.
+            return settled.Stopped!;
+        }
+
+        return await PublishQualityOutputAsync(job, attempt, plan, recipe, validation, cacheLimit, cancellationToken);
+    }
+
+    /// <summary>
+    /// Establishes that this job can produce something worth having. An unknown profile, an
+    /// unmeasurable source, or a target that is not below the source height are all permanent
+    /// failures — retrying them would reach the same answer.
+    /// </summary>
+    private async Task<(QualityPlan? Plan, PreparationOutcome? Rejected)> ResolveQualityPlanAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        string videoFullPath,
         CancellationToken cancellationToken)
     {
         var profile = job.Profile;
         if (!QualityProfiles.IsKnown(profile))
         {
-            return await FailAsync(job, attempt, "unknown-profile", "The requested quality profile is not known.", permanent: true, cancellationToken);
+            return (null, await FailAsync(job, attempt, "unknown-profile", "The requested quality profile is not known.", permanent: true, cancellationToken));
         }
 
         // Quality work always measures the real source: probe fresh rather than
@@ -303,55 +405,88 @@ public sealed class PreparationExecutor(
         var qualityProbe = await probeAdapter.ProbeAsync(videoFullPath, cancellationToken);
         if (!qualityProbe.Success)
         {
-            return await FailAsync(job, attempt, "probe-failed", qualityProbe.Error ?? "The source could not be probed.", permanent: true, cancellationToken);
+            return (null, await FailAsync(job, attempt, "probe-failed", qualityProbe.Error ?? "The source could not be probed.", permanent: true, cancellationToken));
         }
 
-        // The quality branch is dispatched with no cached probe, so everything downstream —
-        // progress, the audio decision and duration validation — has to use this one.
-        var sourceProbe = new ProbeMetadata(
-            qualityProbe.DurationMs, qualityProbe.VideoCodec, qualityProbe.AudioCodec, qualityProbe.Width, qualityProbe.Height);
         var sourceWidth = qualityProbe.Width;
         var sourceHeight = qualityProbe.Height;
         if (sourceWidth is not > 0 || sourceHeight is not > 0)
         {
-            return await FailAsync(job, attempt, "probe-incomplete", "The source dimensions are unknown, so no quality version can be prepared.", permanent: true, cancellationToken);
+            return (null, await FailAsync(job, attempt, "probe-incomplete", "The source dimensions are unknown, so no quality version can be prepared.", permanent: true, cancellationToken));
         }
 
         var targetHeight = QualityProfiles.TargetHeight(profile)!.Value;
         if (targetHeight >= sourceHeight.Value)
         {
             // The native rendition already serves this quality; upscaling is never offered.
-            return await FailAsync(
+            return (null, await FailAsync(
                 job,
                 attempt,
                 "profile-eligibility",
                 $"The requested {profile}p quality is not below the source height ({sourceHeight}p); the original already provides this quality.",
                 permanent: true,
-                cancellationToken);
+                cancellationToken));
         }
 
-        // An existing rendition for this profile means the work is either already done
-        // (adopt) or vanished (prepare fresh) — dedup happened at scheduling time.
+        // The quality branch is dispatched with no cached probe, so everything downstream —
+        // progress, the audio decision and duration validation — has to use this one.
+        var sourceProbe = new ProbeMetadata(
+            qualityProbe.DurationMs, qualityProbe.VideoCodec, qualityProbe.AudioCodec, qualityProbe.Width, qualityProbe.Height);
+        var (scaledWidth, scaledHeight) = QualityProfiles.ScaledDimensions(sourceWidth.Value, sourceHeight.Value, targetHeight);
+
+        return (new QualityPlan(profile!, sourceProbe, sourceWidth.Value, sourceHeight.Value, scaledWidth, scaledHeight), null);
+    }
+
+    /// <summary>
+    /// An existing rendition for this profile means the work is either already done or its
+    /// file has vanished — dedup happened at scheduling time. A copy that still validates is
+    /// adopted and the job succeeds without encoding; anything else returns null so the
+    /// caller prepares fresh.
+    /// </summary>
+    private async Task<PreparationOutcome?> TryAdoptReadyQualityRenditionAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        QualityPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var profile = plan.Profile;
         var existing = await context.Renditions
             .SingleOrDefaultAsync(candidate => candidate.LessonId == job.LessonId
                 && candidate.SourceGeneration == job.SourceGeneration
                 && candidate.Purpose == RenditionPurpose.Quality
                 && candidate.Profile == profile, cancellationToken);
-        if (existing is not null && existing.Status == RenditionStatus.Ready
-            && LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, existing.RelativePath, out var existingFullPath))
+        if (existing is null
+            || existing.Status != RenditionStatus.Ready
+            || !LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, existing.RelativePath, out var existingFullPath))
         {
-            var existingValidation = await validator.ValidateAsync(existingFullPath, sourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken);
-            if (existingValidation.Success)
-            {
-                await CompleteAttemptAsync(attempt, 0, null, null, cancellationToken);
-                await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
-                await context.SaveChangesAsync(cancellationToken);
-                return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
-            }
+            return null;
         }
 
-        // Cache budget: ready + reserved must leave room for the reservation. Evict
-        // least-recently-watched quality copies if needed; block when impossible.
+        var existingValidation = await validator.ValidateAsync(existingFullPath, plan.SourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken);
+        if (!existingValidation.Success)
+        {
+            return null;
+        }
+
+        await CompleteAttemptAsync(attempt, 0, null, null, cancellationToken);
+        await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+        return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
+    }
+
+    /// <summary>
+    /// Cache budget: ready plus reserved bytes must leave room for this job's reservation.
+    /// Least-recently-watched quality copies are evicted to make room, and the job is blocked
+    /// when even that is not enough. On success the reservation is recorded against the job
+    /// so concurrent jobs see the space as spoken for.
+    /// </summary>
+    private async Task<(long CacheLimit, PreparationOutcome? Blocked)> ReserveCacheBudgetAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        QualityPlan plan,
+        string videoFullPath,
+        CancellationToken cancellationToken)
+    {
         var cacheLimit = await cacheAccounting.GetCacheLimitAsync(cancellationToken);
         var reservation = new FileInfo(videoFullPath).Length;
         var usage = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
@@ -363,44 +498,40 @@ public sealed class PreparationExecutor(
                 + await cacheAccounting.GetReservedQualityBytesAsync(cancellationToken);
             if (usage + reservation > cacheLimit)
             {
-                return await BlockAsync(
+                return (cacheLimit, await BlockAsync(
                     job,
                     attempt,
                     "cache-full",
-                    $"Not enough quality cache space to prepare this version. The {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version needs about {cacheAccounting.DescribeBytes(reservation)}; the cache limit is {cacheAccounting.DescribeBytes(cacheLimit)}. Reduce the limit's contents or raise the limit in settings.",
-                    cancellationToken);
+                    $"Not enough quality cache space to prepare this version. The {plan.Label} version needs about {cacheAccounting.DescribeBytes(reservation)}; the cache limit is {cacheAccounting.DescribeBytes(cacheLimit)}. Reduce the limit's contents or raise the limit in settings.",
+                    cancellationToken));
             }
         }
 
         job.ReservedBytes = reservation;
         await context.SaveChangesAsync(cancellationToken);
+        return (cacheLimit, null);
+    }
 
-        var (scaledWidth, scaledHeight) = QualityProfiles.ScaledDimensions(sourceWidth.Value, sourceHeight.Value, targetHeight);
-
+    /// <summary>
+    /// Turns the plan into an encoder invocation and the paths it writes. Pure: no database,
+    /// no filesystem, so the recipe can be reasoned about (and the directory created) before
+    /// anything is committed.
+    /// </summary>
+    private QualityRecipe BuildQualityRecipe(
+        PreparationJobEntity job,
+        QualityPlan plan,
+        string videoFullPath,
+        SourceComponentEntity video,
+        string? companionFullPath,
+        SourceComponentEntity? companion)
+    {
         // A companion carries the audio when one exists; otherwise the source's own track,
         // which may legitimately be absent. Audio is only required of the output when the
         // input actually has some, so a silent source is not failed for missing AAC.
-        var incomingAudioCodec = companionFullPath is not null ? "aac" : sourceProbe.AudioCodec;
+        var incomingAudioCodec = companionFullPath is not null ? "aac" : plan.SourceProbe.AudioCodec;
         var hasAudio = incomingAudioCodec is not null;
         var needsAudioTranscode = hasAudio && incomingAudioCodec != "aac";
         var expectedAudioCodec = !hasAudio ? null : needsAudioTranscode ? "aac" : incomingAudioCodec;
-
-        var audioArguments = companionFullPath is not null
-            ? new[] { "-i", companionFullPath, "-map", "0:v:0", "-map", "1:a:0" }
-            : new[] { "-map", "0:v:0", "-map", "0:a:0?" };
-        var audioCodecArguments = needsAudioTranscode || !hasAudio
-            ? new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k" }
-            : new[] { "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy" };
-
-        var arguments = new List<string> { "-i", videoFullPath };
-        arguments.AddRange(audioArguments);
-        arguments.AddRange(audioCodecArguments);
-        arguments.AddRange(
-        [
-            "-vf", $"scale={scaledWidth.ToString(CultureInfo.InvariantCulture)}:{scaledHeight.ToString(CultureInfo.InvariantCulture)}",
-            "-movflags", "+faststart",
-            "-f", "mp4", "-y", "{output}"
-        ]);
 
         var fingerprint = SourceFingerprint.Compute(
         [
@@ -410,35 +541,53 @@ public sealed class PreparationExecutor(
                 : Array.Empty<(string, string, string)>()
         ]);
 
-        var qualityDirectory = Path.Combine(appOptions.Value.LibraryRoot, ".tutsvideoplayer", "quality",
+        var outputDirectory = Path.Combine(appOptions.Value.LibraryRoot, ".tutsvideoplayer", "quality",
             job.LessonId.ToString(CultureInfo.InvariantCulture), job.SourceGeneration.ToString(CultureInfo.InvariantCulture));
-        Directory.CreateDirectory(qualityDirectory);
+        var outputFileName = $"{SanitizeStem(video.RelativePath)}-{plan.Profile.ToLowerInvariant()}-{fingerprint[..12]}.mp4";
+        var outputFullPath = Path.Combine(outputDirectory, outputFileName);
+        var temporaryFullPath = Path.Combine(outputDirectory, $".{outputFileName}.{job.Id.ToString(CultureInfo.InvariantCulture)}.part");
 
-        var outputFileName = $"{SanitizeStem(video.RelativePath)}-{profile.ToLowerInvariant()}-{fingerprint[..12]}.mp4";
-        var outputFullPath = Path.Combine(qualityDirectory, outputFileName);
-        var manifestFullPath = outputFullPath + ".tvp.json";
-        var temporaryFullPath = Path.Combine(qualityDirectory, $".{outputFileName}.{job.Id.ToString(CultureInfo.InvariantCulture)}.part");
+        // The encoder writes straight to the temporary file; the rename to outputFullPath is
+        // what publishes it, so the encoder never names the final path.
+        var arguments = new List<string> { "-i", videoFullPath };
+        arguments.AddRange(companionFullPath is not null
+            ? new[] { "-i", companionFullPath, "-map", "0:v:0", "-map", "1:a:0" }
+            : new[] { "-map", "0:v:0", "-map", "0:a:0?" });
+        arguments.AddRange(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]);
+        arguments.AddRange(needsAudioTranscode || !hasAudio
+            ? new[] { "-c:a", "aac", "-b:a", "192k" }
+            : new[] { "-c:a", "copy" });
+        arguments.AddRange(
+        [
+            "-vf", $"scale={plan.ScaledWidth.ToString(CultureInfo.InvariantCulture)}:{plan.ScaledHeight.ToString(CultureInfo.InvariantCulture)}",
+            "-movflags", "+faststart",
+            "-f", "mp4", "-y", temporaryFullPath
+        ]);
 
-        if (!CheckDiskReserve(qualityDirectory, out var freeMessage))
-        {
-            return await BlockAsync(job, attempt, "insufficient-disk", freeMessage, cancellationToken);
-        }
+        return new QualityRecipe(
+            arguments,
+            expectedAudioCodec,
+            fingerprint,
+            video.RelativePath,
+            outputDirectory,
+            outputFileName,
+            outputFullPath,
+            outputFullPath + ".tvp.json",
+            temporaryFullPath);
+    }
 
-        job.OutputRelativePath = RelativeToLibraryRoot(outputFullPath);
-        job.ManifestRelativePath = RelativeToLibraryRoot(manifestFullPath);
-
-        // Recorded before the encoder starts: a crash mid-encode has to leave a trail to
-        // the partial file, which lives in the managed quality area rather than beside the
-        // source, so recovery can delete it instead of guessing.
-        attempt.TempRelativePath = RelativeToLibraryRoot(temporaryFullPath);
-
-        var effectiveArguments = arguments
-            .Select(argument => argument == "{output}" ? temporaryFullPath : argument)
-            .ToList();
-
-        var sourceDuration = sourceProbe.DurationMs;
-        await context.SaveChangesAsync(cancellationToken);
-
+    /// <summary>
+    /// Runs the encoder, reporting progress onto the job and watching the growing temporary
+    /// file against the cache headroom. Exceeding the headroom cancels the encode there and
+    /// then rather than letting it finish and relying on eviction to clean up afterwards.
+    /// </summary>
+    private async Task<QualityEncodeResult> RunQualityEncodeAsync(
+        PreparationJobEntity job,
+        QualityRecipe recipe,
+        long? sourceDurationMs,
+        long cacheLimit,
+        CancellationToken cancellationToken)
+    {
         // Everything already charged to the cache that this encode is not producing: stored
         // quality copies plus the reservations of other in-flight jobs. The growing
         // temporary file has to fit in what is left, not merely stay under some multiple of
@@ -453,17 +602,17 @@ public sealed class PreparationExecutor(
         try
         {
             result = await ffmpegAdapter.RunAsync(
-                effectiveArguments,
+                recipe.Arguments,
                 async seconds =>
                 {
-                    if (sourceDuration is > 0)
+                    if (sourceDurationMs is > 0)
                     {
-                        job.Progress = Math.Clamp(seconds * 1000.0 / sourceDuration.Value, 0, 1);
+                        job.Progress = Math.Clamp(seconds * 1000.0 / sourceDurationMs.Value, 0, 1);
                     }
 
-                    if (!overBudget && File.Exists(temporaryFullPath))
+                    if (!overBudget && File.Exists(recipe.TemporaryFullPath))
                     {
-                        var current = new FileInfo(temporaryFullPath).Length;
+                        var current = new FileInfo(recipe.TemporaryFullPath).Length;
                         if (current > headroom)
                         {
                             // Stop the encoder now rather than letting it run to completion
@@ -483,54 +632,89 @@ public sealed class PreparationExecutor(
         }
 
         await context.SaveChangesAsync(cancellationToken);
+        return new QualityEncodeResult(result, overBudget, headroom, cacheLimit);
+    }
 
-        if (!result.Success || overBudget)
+    /// <summary>
+    /// Decides whether the encode left something publishable: a failed or over-budget run is
+    /// discarded, a finished file that no longer fits gets one last eviction pass before
+    /// being given up on, and what survives is validated against the source. Returns the
+    /// validation on success, or the terminal outcome that ended the job.
+    /// </summary>
+    private async Task<(OutputValidation? Validation, PreparationOutcome? Stopped)> SettleQualityEncodeAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        QualityPlan plan,
+        QualityRecipe recipe,
+        QualityEncodeResult encode,
+        CancellationToken cancellationToken)
+    {
+        var cacheLimit = encode.CacheLimit;
+
+        if (!encode.Result.Success || encode.OverBudget)
         {
-            TryDeleteTemporary(temporaryFullPath);
+            TryDeleteTemporary(recipe.TemporaryFullPath);
             job.ReservedBytes = null;
-            if (overBudget)
+            if (encode.OverBudget)
             {
-                return await BlockAsync(
+                return (null, await BlockAsync(
                     job,
                     attempt,
                     "cache-full",
-                    $"The {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version did not fit in the remaining quality cache ({cacheAccounting.DescribeBytes(Math.Max(0, headroom))} free of a {cacheAccounting.DescribeBytes(cacheLimit)} limit) and was discarded. Raise the limit in settings or remove other prepared versions.",
-                    cancellationToken);
+                    $"The {plan.Label} version did not fit in the remaining quality cache ({cacheAccounting.DescribeBytes(Math.Max(0, encode.Headroom))} free of a {cacheAccounting.DescribeBytes(cacheLimit)} limit) and was discarded. Raise the limit in settings or remove other prepared versions.",
+                    cancellationToken));
             }
 
-            var transient = IsTransient(result.Error);
-            return await FailAsync(job, attempt, "encode-failed", result.Error ?? "The encode failed.", permanent: !transient, cancellationToken);
+            var transient = IsTransient(encode.Result.Error);
+            return (null, await FailAsync(job, attempt, "encode-failed", encode.Result.Error ?? "The encode failed.", permanent: !transient, cancellationToken));
         }
 
-        var tempInfo = new FileInfo(temporaryFullPath);
-        if (tempInfo.Length > headroom)
+        var tempInfo = new FileInfo(recipe.TemporaryFullPath);
+        if (tempInfo.Length > encode.Headroom)
         {
             // One last chance to make room from cold copies before giving up on the encode.
             await evictionService.EvictUntilUnderLimitAsync(Math.Max(0, cacheLimit - tempInfo.Length), cancellationToken);
-            committedBytes = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
+            var committedBytes = await cacheAccounting.GetChargeableQualityBytesAsync(cancellationToken)
                 + await cacheAccounting.GetReservedQualityBytesAsync(job.Id, cancellationToken);
             if (committedBytes + tempInfo.Length > cacheLimit)
             {
-                TryDeleteTemporary(temporaryFullPath);
+                TryDeleteTemporary(recipe.TemporaryFullPath);
                 job.ReservedBytes = null;
-                return await BlockAsync(
+                return (null, await BlockAsync(
                     job,
                     attempt,
                     "cache-full",
-                    $"The prepared {QualityProfiles.LabelFor(profile, sourceWidth, sourceHeight)} version does not fit in the {cacheAccounting.DescribeBytes(cacheLimit)} quality cache and was discarded.",
-                    cancellationToken);
+                    $"The prepared {plan.Label} version does not fit in the {cacheAccounting.DescribeBytes(cacheLimit)} quality cache and was discarded.",
+                    cancellationToken));
             }
         }
 
         await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
-        var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", expectedAudioCodec, cancellationToken);
+        var validation = await validator.ValidateAsync(recipe.TemporaryFullPath, plan.SourceProbe.DurationMs, "h264", recipe.ExpectedAudioCodec, cancellationToken);
         if (!validation.Success)
         {
-            TryDeleteTemporary(temporaryFullPath);
+            TryDeleteTemporary(recipe.TemporaryFullPath);
             job.ReservedBytes = null;
-            return await FailAsync(job, attempt, "invalid-output", validation.Error ?? "The prepared output failed validation.", permanent: false, cancellationToken);
+            return (null, await FailAsync(job, attempt, "invalid-output", validation.Error ?? "The prepared output failed validation.", permanent: false, cancellationToken));
         }
 
+        return (validation, null);
+    }
+
+    /// <summary>
+    /// Publishes the validated temporary file: Prepared manifest, rename without overwrite,
+    /// Committed manifest, then the rendition row. The manifest is written on both sides of
+    /// the rename so a crash in between is recognisable during recovery.
+    /// </summary>
+    private async Task<PreparationOutcome> PublishQualityOutputAsync(
+        PreparationJobEntity job,
+        PreparationAttemptEntity attempt,
+        QualityPlan plan,
+        QualityRecipe recipe,
+        OutputValidation validation,
+        long cacheLimit,
+        CancellationToken cancellationToken)
+    {
         await TransitionAsync(job, PreparationJobState.Publishing, cancellationToken);
 
         var manifest = new PreparationManifest
@@ -538,9 +722,9 @@ public sealed class PreparationExecutor(
             JobId = job.Id,
             LessonId = job.LessonId,
             SourceGeneration = job.SourceGeneration,
-            RecipeVersion = QualityProfiles.RecipeVersionFor(profile!),
-            Sources = [new ManifestSource("video", video.RelativePath, fingerprint)],
-            OutputFileName = outputFileName,
+            RecipeVersion = QualityProfiles.RecipeVersionFor(plan.Profile),
+            Sources = [new ManifestSource("video", recipe.VideoRelativePath, recipe.Fingerprint)],
+            OutputFileName = recipe.OutputFileName,
             OutputHash = validation.OutputHash,
             OutputLengthBytes = validation.ByteLength,
             DurationMs = validation.Probe.DurationMs,
@@ -550,15 +734,15 @@ public sealed class PreparationExecutor(
             AudioCodec = validation.Probe.AudioCodec,
             State = "Prepared"
         };
-        manifest.WriteAtomically(manifestFullPath);
+        manifest.WriteAtomically(recipe.ManifestFullPath);
 
-        File.Move(temporaryFullPath, outputFullPath, overwrite: false);
+        File.Move(recipe.TemporaryFullPath, recipe.OutputFullPath, overwrite: false);
         manifest = manifest with { State = "Committed" };
-        manifest.WriteAtomically(manifestFullPath);
+        manifest.WriteAtomically(recipe.ManifestFullPath);
 
         job.ReservedBytes = null;
-        await PublishQualityAsync(job, outputFullPath, manifestFullPath, validation, profile!, scaledWidth, scaledHeight, cancellationToken);
-        await CompleteAttemptAsync(attempt, exitCode: 0, failure: null, temporaryFullPath, cancellationToken);
+        await PublishQualityAsync(job, recipe.OutputFullPath, recipe.ManifestFullPath, validation, plan.Profile, plan.ScaledWidth, plan.ScaledHeight, cancellationToken);
+        await CompleteAttemptAsync(attempt, exitCode: 0, failure: null, recipe.TemporaryFullPath, cancellationToken);
         await TransitionAsync(job, PreparationJobState.Succeeded, cancellationToken);
         await context.SaveChangesAsync(cancellationToken);
 
@@ -566,7 +750,7 @@ public sealed class PreparationExecutor(
         // (it was just accessed, so LRU evicts older entries first).
         await evictionService.EvictUntilUnderLimitAsync(cacheLimit, cancellationToken);
 
-        logger.LogInformation("Prepared {Output} ({Profile}) for lesson {LessonId}.", outputFileName, profile, job.LessonId);
+        logger.LogInformation("Prepared {Output} ({Profile}) for lesson {LessonId}.", recipe.OutputFileName, plan.Profile, job.LessonId);
         return new PreparationOutcome(PreparationJobState.Succeeded, null, null);
     }
 
