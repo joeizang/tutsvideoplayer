@@ -1,8 +1,28 @@
 import { useState } from "react";
 import type { CourseTreeModel, CourseTreeNodeModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
+import { FolderClosedIcon, FolderOpenIcon } from "./Icons.tsx";
+
+// The rail opens on the section being watched and nothing else: a long course is a wall of
+// modules otherwise. Ancestors of the current lesson are walked up front so a nested module
+// still opens along its whole path, and the same set is computed on the server render.
+function ancestorFolderIds(nodes: readonly CourseTreeNodeModel[], lessonId: string) {
+    const parentOf = new Map<string, string | null>();
+    for (const node of nodes) {
+        parentOf.set(node.id, node.folderId ?? null);
+    }
+
+    const open = new Set<string>();
+    let current = parentOf.get(lessonId) ?? null;
+    while (current !== null && !open.has(current)) {
+        open.add(current);
+        current = parentOf.get(current) ?? null;
+    }
+
+    return open;
+}
 
 export function LessonRail({ rail, currentLessonId }: { rail: CourseTreeModel; currentLessonId: string }) {
-    const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+    const [expanded, setExpanded] = useState<Set<string>>(() => ancestorFolderIds(rail.nodes, currentLessonId));
 
     const childrenByFolder = new Map<string | null, CourseTreeNodeModel[]>();
     for (const node of rail.nodes) {
@@ -13,7 +33,7 @@ export function LessonRail({ rail, currentLessonId }: { rail: CourseTreeModel; c
     }
 
     const toggle = (folderId: string) => {
-        setCollapsed((current) => {
+        setExpanded((current) => {
             const next = new Set(current);
             if (next.has(folderId)) {
                 next.delete(folderId);
@@ -27,22 +47,26 @@ export function LessonRail({ rail, currentLessonId }: { rail: CourseTreeModel; c
     const renderNodes = (folderId: string | null, depth: number) => {
         const nodes = childrenByFolder.get(folderId) ?? [];
         return (
-            <ul className="m-0 list-none p-0" role={depth === 0 ? "tree" : "group"}>
+            <ul className={`m-0 list-none p-0 ${depth > 0 ? "ml-3 border-l border-ink/10 pl-2 dark:border-neutral-700" : ""}`} role={depth === 0 ? "tree" : "group"}>
                 {nodes.map((node) => {
                     if (node.type === "folder") {
-                        const isCollapsed = collapsed.has(node.id);
+                        const isOpen = expanded.has(node.id);
                         return (
-                            <li key={node.id} role="none" className="mt-2">
+                            <li key={node.id} role="none" className="mt-1">
                                 <button
                                     type="button"
-                                    className="inline-flex items-center gap-1 border-0 bg-transparent p-0 text-left text-sm font-semibold text-ink dark:text-neutral-100"
-                                    aria-expanded={!isCollapsed}
+                                    className="flex w-full items-center gap-2 rounded border-0 bg-transparent px-1.5 py-2 text-left text-sm font-semibold text-ink hover:bg-action/10 dark:text-neutral-100"
+                                    aria-expanded={isOpen}
                                     onClick={() => toggle(node.id)}
                                 >
-                                    <span aria-hidden="true" className="w-4 text-ink-soft dark:text-neutral-400">{isCollapsed ? "▸" : "▾"}</span>
-                                    {node.title}
+                                    <span className="text-folder">
+                                        {isOpen
+                                            ? <FolderOpenIcon className="h-5 w-5 shrink-0" />
+                                            : <FolderClosedIcon className="h-5 w-5 shrink-0" />}
+                                    </span>
+                                    <span className="min-w-0">{node.title}</span>
                                 </button>
-                                {!isCollapsed ? renderNodes(node.id, depth + 1) : null}
+                                {isOpen ? renderNodes(node.id, depth + 1) : null}
                             </li>
                         );
                     }
@@ -54,7 +78,7 @@ export function LessonRail({ rail, currentLessonId }: { rail: CourseTreeModel; c
                                 href={`/watch/${node.id}`}
                                 role="treeitem"
                                 aria-current={isCurrent ? "true" : undefined}
-                                className={`-mx-1 my-0.5 inline-block rounded px-1.5 py-0.5 text-sm ${
+                                className={`my-0.5 block rounded px-1.5 py-1 text-sm ${
                                     isCurrent
                                         ? "bg-action text-white"
                                         : "text-ink hover:bg-action/10 dark:text-neutral-200"

@@ -3,6 +3,7 @@ import type { WatchLessonModel } from "dotnet:types/TutsVideoPlayer/Web/Models";
 import { useEffect, useState } from "react";
 import { LessonRail } from "../Shared/LessonRail.tsx";
 import { VideoPlayer } from "../Shared/VideoPlayer.tsx";
+import { ArrowLeftIcon, ArrowRightIcon } from "../Shared/Icons.tsx";
 import "/css/app.css";
 
 export const head = (model: WatchLessonModel) => ({
@@ -98,6 +99,19 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                         </div>
                     )}
 
+                    <nav className="mt-6 flex w-full items-center justify-between gap-4" aria-label="Lesson navigation">
+                        {lesson.previousLessonId ? (
+                            <a className="inline-flex items-center gap-1.5 font-semibold text-action" href={`/watch/${lesson.previousLessonId}`}>
+                                <ArrowLeftIcon className="h-5 w-5" />Previous
+                            </a>
+                        ) : <span />}
+                        {lesson.nextLessonId ? (
+                            <a className="inline-flex items-center gap-1.5 font-semibold text-action" href={`/watch/${lesson.nextLessonId}`}>
+                                Next<ArrowRightIcon className="h-5 w-5" />
+                            </a>
+                        ) : <span />}
+                    </nav>
+
                     <dl className="mt-6 grid max-w-2xl grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
                         <dt className="font-semibold text-ink-soft dark:text-neutral-400">Filename</dt>
                         <dd className="break-all">{lesson.filename}</dd>
@@ -120,15 +134,6 @@ export default function Lesson({ model }: ViewProps<WatchLessonModel>) {
                                 : "No subtitle files found in this course"}
                         </dd>
                     </dl>
-
-                    <div className="mt-6 flex max-w-2xl justify-between">
-                        {lesson.previousLessonId ? (
-                            <a className="font-semibold text-action" href={`/watch/${lesson.previousLessonId}`}>← Previous</a>
-                        ) : <span />}
-                        {lesson.nextLessonId ? (
-                            <a className="font-semibold text-action" href={`/watch/${lesson.nextLessonId}`}>Next →</a>
-                        ) : <span />}
-                    </div>
                 </section>
             </div>
         </main>
