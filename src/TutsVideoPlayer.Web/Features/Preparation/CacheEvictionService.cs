@@ -10,6 +10,7 @@ using TutsVideoPlayer.Web.Features.Library;
 namespace TutsVideoPlayer.Web.Features.Preparation;
 
 public sealed record EvictionOutcome(int EvictedCount, long ReclaimedBytes, long? PendingBytes);
+public sealed record StaleEvictionOutcome(bool Success, string? ErrorCode = null, string? Message = null);
 
 /// <summary>
 /// Two-phase cache eviction. Only Quality renditions are ever eligible — permanent copies
@@ -29,19 +30,32 @@ public sealed class CacheEvictionService(AppDbContext context, IOptions<AppOptio
         status is RenditionStatus.Ready or RenditionStatus.Stale;
 
     /// <summary>Retire an outdated recipe before replacing its cache file.</summary>
-    public async Task<bool> TryEvictStaleAsync(RenditionEntity rendition, CancellationToken cancellationToken)
+    public async Task<StaleEvictionOutcome> TryEvictStaleAsync(RenditionEntity rendition, CancellationToken cancellationToken)
     {
         if (rendition.RetentionClass != RenditionRetention.Quality || rendition.Status != RenditionStatus.Stale)
-            return false;
-        if (!TryResolveManagedFile(rendition.RelativePath, out var path)) return false;
+            return new(false, "outdated-copy-changed", "The quality copy changed during preparation. Refresh the library and retry.");
+        if (!TryResolveManagedFile(rendition.RelativePath, out var path))
+            return new(false, "outdated-copy-unavailable", "The outdated quality copy is missing or outside the managed cache. Refresh the library and check cache paths and permissions.");
         var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs;
         if (await context.PlaybackSessions.AnyAsync(session => session.ActiveRenditionId == rendition.Id
             && session.ClosedUtcMs == null && session.LastHeartbeatUtcMs >= cutoff, cancellationToken))
-            return false;
+            return new(false, "outdated-copy-in-use", "The outdated quality copy is being watched. Close active playback and retry preparation.");
+        if (!IsOwnedByThisApplication(rendition, path!))
+            return new(false, "outdated-copy-unowned", "The outdated quality copy could not be verified as application-owned. Check the cache file and its provenance before retrying.");
 
         await EvictAsync(rendition, cancellationToken);
         await context.Entry(rendition).ReloadAsync(cancellationToken);
-        return rendition.Status == RenditionStatus.Evicted && !File.Exists(path);
+        if (rendition.Status != RenditionStatus.Evicted)
+            return new(false, "outdated-copy-changed", "The quality copy changed during preparation. Refresh the library and retry.");
+        if (File.Exists(path))
+        {
+            // A failed delete still consumes disk space and must remain retryable.
+            rendition.Status = RenditionStatus.Stale;
+            rendition.Revision++;
+            await context.SaveChangesAsync(cancellationToken);
+            return new(false, "outdated-copy-delete-failed", "The outdated quality copy could not be deleted. Check cache permissions and available storage, then retry.");
+        }
+        return new(true);
     }
 
     public async Task<EvictionOutcome> EvictUntilUnderLimitAsync(long cacheLimitBytes, CancellationToken cancellationToken = default)

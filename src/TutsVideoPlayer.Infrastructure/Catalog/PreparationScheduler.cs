@@ -121,9 +121,10 @@ public static class PreparationScheduler
                     await context.SaveChangesAsync(cancellationToken);
                     // Also repair a crash between invalidation and scheduling, without
                     // repeatedly retrying a new recipe that failed or was canceled.
-                    var prior = await context.PreparationJobs.AsNoTracking().SingleOrDefaultAsync(j =>
+                    var prior = await context.PreparationJobs.AsNoTracking().Where(j =>
                         j.LessonId == lesson.Id && j.SourceGeneration == lesson.SourceGeneration
-                        && j.Purpose == RenditionPurpose.Quality && j.Profile == copy.Profile, cancellationToken);
+                        && j.Purpose == RenditionPurpose.Quality && j.Profile == copy.Profile)
+                        .OrderByDescending(j => j.Id).FirstOrDefaultAsync(cancellationToken);
                     if (prior is null || prior.State == PreparationJobState.Succeeded
                         || (prior.State == PreparationJobState.Failed
                             && prior.RecipeVersion != QualityProfiles.RecipeVersionFor(copy.Profile!)))
@@ -212,6 +213,7 @@ public static class PreparationScheduler
     internal static void Requeue(PreparationJobEntity job, string recipeVersion)
     {
         job.State = PreparationJobState.Queued;
+        job.EnqueuedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         job.RecipeVersion = recipeVersion;
         job.Attempt = 0;
         job.Progress = null;

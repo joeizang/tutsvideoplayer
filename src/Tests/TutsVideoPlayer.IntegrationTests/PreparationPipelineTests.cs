@@ -122,6 +122,7 @@ public class PreparationPipelineTests(PreparingApplication application)
         {
             jobs = await client.GetFromJsonAsync<List<PreparationJobModel>>(
                 "/api/v1/preparations?limit=50", TestContext.Current.CancellationToken);
+            jobs = jobs?.Where(job => job.Purpose == "Compatibility").ToList();
             if (jobs is not null
                 && jobs.All(job => job.State is "Succeeded" or "Failed" or "Blocked" or "Canceled"))
             {
@@ -170,6 +171,7 @@ public class PreparationPipelineTests(PreparingApplication application)
         var jobs = await listResponse.Content.ReadFromJsonAsync<List<PreparationJobModel>>(cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.NotNull(jobs);
+        jobs = jobs.Where(job => job.Purpose == "Compatibility").ToList();
         Assert.Equal(2, jobs.Count);
         Assert.DoesNotContain(jobs, job => job.LessonTitle.Contains("Tall", StringComparison.Ordinal));
         Assert.All(jobs, job => Assert.NotEqual("Exempt", job.LessonTitle));
@@ -227,7 +229,8 @@ public class PreparationPipelineTests(PreparingApplication application)
 
         var jobsAfter = await client.GetFromJsonAsync<List<PreparationJobModel>>(
             "/api/v1/preparations?limit=50", TestContext.Current.CancellationToken);
-        if (jobsAfter!.Count != 2)
+        jobsAfter = jobsAfter!.Where(job => job.Purpose == "Compatibility").ToList();
+        if (jobsAfter.Count != 2)
         {
             throw new Xunit.Sdk.XunitException(
                 $"Expected 2 jobs, got {jobsAfter.Count}: [{string.Join(", ", jobsAfter.Select(job => $"{job.LessonTitle}:{job.State}"))}] Errors: [{string.Join(" | ", application.CapturedErrors.TakeLast(3))}]");

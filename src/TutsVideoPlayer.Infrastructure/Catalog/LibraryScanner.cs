@@ -289,7 +289,9 @@ public sealed class LibraryScanner(
                         probe.Error ?? "The media file could not be probed."));
                 }
 
-                var digest = await ContentFingerprint.ComputeAsync(absolutePath, cancellationToken);
+                var digest = !videoHintsMatch || currentVideo?.Sha256 is null
+                    ? await ContentFingerprint.ComputeAsync(absolutePath, cancellationToken)
+                    : currentVideo.Sha256;
                 if (digest is null)
                 {
                     issueBuffer.Add(new LibraryEnumerationIssue(
@@ -606,7 +608,9 @@ public sealed class LibraryScanner(
                 : ParseProbeMetadata(videoComponent.ProbeMetadata);
 
             var containerCompatible = IsBrowserCompatibleContainer(lesson.PrimaryRelativePath);
-            var status = !containerCompatible || probe?.IsVariableFrameRate == true
+            // Keep browser-compatible sources available while normalization is queued,
+            // blocked, or failed. Ready permanent copies win default selection.
+            var status = !containerCompatible
                 ? RenditionStatus.Pending
                 : probe is not null
                     ? RenditionStatus.Ready

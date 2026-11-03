@@ -106,6 +106,29 @@ public sealed class PreparationExecutor(
             }
 
             job.RecipeVersion = recipe.RecipeVersion;
+            if (probe?.IsVariableFrameRate == true)
+            {
+                var outdated = await context.Renditions.Where(r => r.LessonId == job.LessonId
+                    && r.SourceGeneration == job.SourceGeneration && r.Purpose == RenditionPurpose.Compatibility
+                    && r.RecipeVersion != recipe.RecipeVersion && (r.Status == RenditionStatus.Ready || r.Status == RenditionStatus.Stale))
+                    .ToListAsync(cancellationToken);
+                foreach (var copy in outdated)
+                {
+                    if (copy.Status == RenditionStatus.Ready)
+                    {
+                        copy.Status = RenditionStatus.Stale;
+                        copy.Revision++;
+                        await context.SaveChangesAsync(cancellationToken);
+                    }
+                    var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs;
+                    if (await context.PlaybackSessions.AnyAsync(s => s.ActiveRenditionId == copy.Id
+                        && s.ClosedUtcMs == null && s.LastHeartbeatUtcMs >= cutoff, cancellationToken))
+                    {
+                        return await BlockAsync(job, attempt, "outdated-copy-in-use",
+                            "The outdated playback copy is being watched. Close active playback and retry preparation.", cancellationToken);
+                    }
+                }
+            }
             var fingerprint = SourceFingerprint.Compute(
             [
                 ("video", video.RelativePath, videoFullPath),
@@ -131,7 +154,7 @@ public sealed class PreparationExecutor(
             {
                 // A previous attempt already published a byte-identical output for this
                 // source set; adopt it instead of encoding again.
-                return await AdoptExistingOutputAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, fingerprint, sourceDurationMs: probe?.DurationMs, cancellationToken);
+                return await AdoptExistingOutputAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, fingerprint, sourceDurationMs: probe?.DurationMs, cancellationToken, recipe.RequiresConstantFrameRate);
             }
 
             if (!CheckDiskReserve(outputDirectory, out var freeMessage))
@@ -464,10 +487,10 @@ public sealed class PreparationExecutor(
             existing.Status = RenditionStatus.Stale;
             existing.Revision++;
             await context.SaveChangesAsync(cancellationToken);
-            if (!await evictionService.TryEvictStaleAsync(existing, cancellationToken))
+            var retirement = await evictionService.TryEvictStaleAsync(existing, cancellationToken);
+            if (!retirement.Success)
             {
-                return await BlockAsync(job, attempt, "outdated-copy-in-use",
-                    "The outdated quality copy could not be retired. Close active playback and retry preparation.", cancellationToken);
+                return await BlockAsync(job, attempt, retirement.ErrorCode!, retirement.Message!, cancellationToken);
             }
             return null;
         }
@@ -478,9 +501,15 @@ public sealed class PreparationExecutor(
             return null;
         }
 
-        var existingValidation = await validator.ValidateAsync(existingFullPath, plan.SourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken);
+        var existingValidation = await validator.ValidateAsync(existingFullPath, plan.SourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken, requireConstantFrameRate: true);
         if (!existingValidation.Success)
         {
+            existing.Status = RenditionStatus.Stale;
+            existing.Revision++;
+            await context.SaveChangesAsync(cancellationToken);
+            var retirement = await evictionService.TryEvictStaleAsync(existing, cancellationToken);
+            if (!retirement.Success)
+                return await BlockAsync(job, attempt, retirement.ErrorCode!, retirement.Message!, cancellationToken);
             return null;
         }
 
@@ -804,7 +833,7 @@ public sealed class PreparationExecutor(
         {
             // A previous attempt already published a byte-identical output for this
             // source set; adopt it instead of encoding again.
-            return await AdoptExistingOutputAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, fingerprint, sourceDurationMs: probe?.DurationMs, cancellationToken);
+            return await AdoptExistingOutputAsync(job, attempt, outputFullPath, manifestFullPath, outputFileName, fingerprint, sourceDurationMs: probe?.DurationMs, cancellationToken, RecipeRequiresConstantFrameRate(recipeVersion));
         }
 
         if (!CheckDiskReserve(outputDirectory, out var freeMessage))
@@ -844,7 +873,8 @@ public sealed class PreparationExecutor(
         }
 
         await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
-        var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", expectedAudioCodec, cancellationToken);
+        var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", expectedAudioCodec, cancellationToken,
+            requireConstantFrameRate: RecipeRequiresConstantFrameRate(recipeVersion));
         if (!validation.Success)
         {
             File.Delete(temporaryFullPath);
@@ -1071,7 +1101,8 @@ public sealed class PreparationExecutor(
                         && manifest.Sources.Count > 0 && manifest.Sources[0].Fingerprint == fingerprint
                         && PreparationArtifacts.IsVerifiedOutput(outputPath, manifest))
                     {
-                        var validation = await validator.ValidateAsync(outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken);
+                        var validation = await validator.ValidateAsync(outputPath, job.Lesson.DurationMs, manifest.VideoCodec, manifest.AudioCodec, cancellationToken,
+                            requireConstantFrameRate: job.Purpose == RenditionPurpose.Quality || RecipeRequiresConstantFrameRate(job.RecipeVersion));
                         if (validation.Success && await TryAdoptRecoveredOutputAsync(job, manifest, manifestPath, outputPath, validation, cancellationToken))
                         {
                             if (job.State is PreparationJobState.Running or PreparationJobState.Validating)
@@ -1277,7 +1308,8 @@ public sealed class PreparationExecutor(
         string outputFileName,
         string fingerprint,
         long? sourceDurationMs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireConstantFrameRate = false)
     {
         var manifest = PreparationManifest.TryRead(manifestFullPath);
         var provenanceMatches = manifest is not null
@@ -1286,7 +1318,7 @@ public sealed class PreparationExecutor(
             && manifest.Sources.Count > 0 && manifest.Sources[0].Fingerprint == fingerprint
             && PreparationArtifacts.IsVerifiedOutput(outputFullPath, manifest);
         var validation = provenanceMatches
-            ? await validator.ValidateAsync(outputFullPath, sourceDurationMs, manifest!.VideoCodec, manifest.AudioCodec, cancellationToken)
+            ? await validator.ValidateAsync(outputFullPath, sourceDurationMs, manifest!.VideoCodec, manifest.AudioCodec, cancellationToken, requireConstantFrameRate)
             : OutputValidation.Fail("The existing output does not have matching verified provenance.");
         if (validation.Success)
         {
@@ -1310,6 +1342,9 @@ public sealed class PreparationExecutor(
             permanent: true,
             cancellationToken);
     }
+
+    private static bool RecipeRequiresConstantFrameRate(string version) =>
+        version is PreparationRecipes.NormalizationVersion or PreparationRecipes.WmvVersion or PreparationRecipes.CompatibilityVersion;
 
     private bool CheckDiskReserve(string outputDirectory, out string message)
     {

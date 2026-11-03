@@ -1,6 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using TutsVideoPlayer.Core.Catalog;
+using TutsVideoPlayer.Infrastructure.Persistence;
+using TutsVideoPlayer.Infrastructure.Persistence.Entities;
+using TutsVideoPlayer.Web.Features.Preparation;
 using Microsoft.AspNetCore.Mvc.Testing;
 using TutsVideoPlayer.Web.Hosting;
 using TutsVideoPlayer.Web.Models;
@@ -332,6 +338,58 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.Equal("Fill", manifest.Preferences.FitMode);
         // The player needs a revision to send with its first settings write.
         Assert.True(manifest.Preferences.Revision > 0);
+    }
+
+    [Theory]
+    [InlineData(RenditionPurpose.Compatibility)]
+    [InlineData(RenditionPurpose.Quality)]
+    public async Task LeasedPreparedCopyKeepsServingRangesAfterBecomingStale(RenditionPurpose purpose)
+    {
+        var token = TestContext.Current.CancellationToken;
+        var client = CreateGuardedClient(application);
+        await application.EnsureCatalogScannedAsync();
+        using var scope = application.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var source = await db.Renditions.AsNoTracking().FirstAsync(r => r.Purpose == RenditionPurpose.Source
+            && r.RelativePath.StartsWith("RealCourse/") && r.Status == RenditionStatus.Ready, token);
+        var copy = new RenditionEntity { LessonId = source.LessonId, SourceGeneration = source.SourceGeneration,
+            Purpose = purpose, RetentionClass = purpose == RenditionPurpose.Quality ? RenditionRetention.Quality : RenditionRetention.Permanent,
+            Status = RenditionStatus.Ready, RelativePath = source.RelativePath, ByteLength = source.ByteLength,
+            RecipeVersion = "range-lease-regression", Profile = purpose == RenditionPurpose.Quality ? "lease" : null };
+        db.Renditions.Add(copy);
+        await db.SaveChangesAsync(token);
+        var session = new PlaybackSessionEntity { LessonId = source.LessonId, SourceGeneration = source.SourceGeneration,
+            ActiveRenditionId = copy.Id, LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+        db.PlaybackSessions.Add(session);
+        await db.SaveChangesAsync(token);
+        try
+        {
+            var url = $"/media/renditions/{copy.Id}";
+            var original = await client.GetByteArrayAsync(url, token);
+            copy.Status = RenditionStatus.Stale;
+            copy.Revision++;
+            await db.SaveChangesAsync(token);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(100, 199);
+            using var response = await client.SendAsync(request, token);
+            Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+            Assert.Equal(original.Skip(100).Take(100), await response.Content.ReadAsByteArrayAsync(token));
+            using var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, url), token);
+            Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+            session.LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs - 1;
+            await db.SaveChangesAsync(token);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.GetAsync(url, token)).StatusCode);
+            session.LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            session.ClosedUtcMs = session.LastHeartbeatUtcMs;
+            await db.SaveChangesAsync(token);
+            Assert.Equal(HttpStatusCode.Conflict, (await client.GetAsync(url, token)).StatusCode);
+        }
+        finally
+        {
+            db.PlaybackSessions.Remove(session);
+            db.Renditions.Remove(copy);
+            await db.SaveChangesAsync(token);
+        }
     }
 
     [Fact]

@@ -64,7 +64,7 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
         startInfo.ArgumentList.Add("%+30");
         startInfo.ArgumentList.Add("-show_packets");
         startInfo.ArgumentList.Add("-show_entries");
-        startInfo.ArgumentList.Add("format=duration:stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate:packet=stream_index,pts_time");
+        startInfo.ArgumentList.Add("format=duration:stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,time_base:packet=stream_index,pts_time");
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(absolutePath);
 
@@ -158,6 +158,7 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
         string? nominalFrameRate = null;
         string? averageFrameRate = null;
         int? videoStreamIndex = null;
+        string? timeBase = null;
 
         if (root.TryGetProperty("streams", out var streams))
         {
@@ -177,6 +178,7 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
                     nominalFrameRate = stream.TryGetProperty("r_frame_rate", out var nominal) ? nominal.GetString() : null;
                     averageFrameRate = stream.TryGetProperty("avg_frame_rate", out var average) ? average.GetString() : null;
                     videoStreamIndex = stream.TryGetProperty("index", out var index) && index.TryGetInt32(out var streamIndex) ? streamIndex : null;
+                    timeBase = stream.TryGetProperty("time_base", out var resolution) ? resolution.GetString() : null;
                 }
                 else if (codecType == "audio" && audioCodec is null)
                 {
@@ -205,7 +207,7 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
             }
         }
 
-        var variable = FrameRatePolicy.HasIrregularTiming(timestamps);
+        var variable = FrameRatePolicy.HasIrregularTiming(timestamps, timeBase);
         return new MediaProbeResult(true, durationMs, videoCodec, audioCodec, width, height, null,
             nominalFrameRate, averageFrameRate, variable);
     }

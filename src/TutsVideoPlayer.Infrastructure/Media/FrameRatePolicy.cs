@@ -6,25 +6,27 @@ public static class FrameRatePolicy
 {
     // Rate declarations alone are unreliable. Check presentation timestamps, sorted
     // because H.264 B-frames are stored in decode order. Allow container rounding.
-    public static bool HasIrregularTiming(IEnumerable<double> timestamps)
+    public static bool HasIrregularTiming(IEnumerable<double> timestamps, string? timeBase = null)
     {
         var ordered = timestamps.Order().ToArray();
         if (ordered.Length < 3) return false;
         var gaps = ordered.Zip(ordered.Skip(1), (a, b) => b - a).ToArray();
         var typical = gaps.Order().ElementAt(gaps.Length / 2);
-        var tolerance = Math.Max(0.001, typical * 0.02);
+        // A CFR stream may alternate between adjacent tick counts (e.g. 33/34 ms
+        // in Matroska). Include an epsilon for decimal-to-double rounding.
+        var tolerance = Math.Max(Parse(timeBase) ?? 0.001, typical * 0.02) + 1e-9;
         return gaps.Any(gap => Math.Abs(gap - typical) > tolerance);
     }
 
     public static IReadOnlyList<string> EncoderArguments(ProbeMetadata? probe)
     {
         var rate = probe?.IsVariableFrameRate == true
-            ? probe.AverageFrameRate ?? probe.NominalFrameRate
+            ? probe.AverageFrameRate
             : probe?.NominalFrameRate ?? probe?.AverageFrameRate;
         var value = Parse(rate);
-        if (value is null)
+        if (value is null && probe?.IsVariableFrameRate != true)
         {
-            rate = probe?.IsVariableFrameRate == true ? probe.NominalFrameRate : probe?.AverageFrameRate;
+            rate = probe?.AverageFrameRate;
             value = Parse(rate);
         }
         if (value is null)
