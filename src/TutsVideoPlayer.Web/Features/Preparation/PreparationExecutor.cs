@@ -125,7 +125,7 @@ public sealed class PreparationExecutor(
                         && s.ClosedUtcMs == null && s.LastHeartbeatUtcMs >= cutoff, cancellationToken))
                     {
                         return await BlockAsync(job, attempt, "outdated-copy-in-use",
-                            "The outdated playback copy is being watched. Close active playback and retry preparation.", cancellationToken);
+                            "The outdated playback copy is being watched. Preparation will resume automatically when playback ends.", cancellationToken);
                     }
                 }
             }
@@ -504,6 +504,9 @@ public sealed class PreparationExecutor(
         var existingValidation = await validator.ValidateAsync(existingFullPath, plan.SourceProbe.DurationMs, "h264", existing.AudioCodec, cancellationToken, requireConstantFrameRate: true);
         if (!existingValidation.Success)
         {
+            if (!existingValidation.IsContentFailure)
+                return await FailAsync(job, attempt, "quality-validation-unavailable",
+                    "The existing quality copy could not be validated and has been preserved. Retry when media inspection is available.", permanent: false, cancellationToken);
             existing.Status = RenditionStatus.Stale;
             existing.Revision++;
             await context.SaveChangesAsync(cancellationToken);

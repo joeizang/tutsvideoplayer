@@ -7,10 +7,11 @@ public sealed record OutputValidation(
     string? Error,
     ProbeMetadata Probe,
     long ByteLength,
-    string OutputHash)
+    string OutputHash,
+    bool IsContentFailure = false)
 {
-    public static OutputValidation Fail(string error) =>
-        new(false, error, new ProbeMetadata(null, null, null, null, null), 0, string.Empty);
+    public static OutputValidation Fail(string error, bool isContentFailure = false) =>
+        new(false, error, new ProbeMetadata(null, null, null, null, null), 0, string.Empty, isContentFailure);
 }
 
 /// <summary>
@@ -29,10 +30,11 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
         bool requireConstantFrameRate = false)
     {
         var file = new FileInfo(outputPath);
-        if (!file.Exists || file.Length == 0)
+        if (!file.Exists)
         {
-            return OutputValidation.Fail("The prepared output is empty or missing.");
+            return OutputValidation.Fail("The prepared output is missing or unavailable.");
         }
+        if (file.Length == 0) return OutputValidation.Fail("The prepared output is empty.", isContentFailure: true);
 
         var probe = await probeAdapter.ProbeAsync(outputPath, cancellationToken);
         if (!probe.Success)
@@ -43,18 +45,18 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
         if (probe.VideoCodec != (expectedVideoCodec ?? "h264"))
         {
             return OutputValidation.Fail(
-                $"The prepared output video codec is {probe.VideoCodec ?? "unknown"}, expected {expectedVideoCodec ?? "h264"}.");
+                $"The prepared output video codec is {probe.VideoCodec ?? "unknown"}, expected {expectedVideoCodec ?? "h264"}.", isContentFailure: true);
         }
 
         if (requireConstantFrameRate && probe.IsVariableFrameRate == true)
         {
-            return OutputValidation.Fail("The prepared output still has irregular video frame timing.");
+            return OutputValidation.Fail("The prepared output still has irregular video frame timing.", isContentFailure: true);
         }
 
         if (expectedAudioCodec is not null && probe.AudioCodec != expectedAudioCodec)
         {
             return OutputValidation.Fail(
-                $"The prepared output audio codec is {probe.AudioCodec ?? "missing"}, expected {expectedAudioCodec}.");
+                $"The prepared output audio codec is {probe.AudioCodec ?? "missing"}, expected {expectedAudioCodec}.", isContentFailure: true);
         }
 
         if (sourceDurationMs is > 0 && probe.DurationMs is > 0)
@@ -63,7 +65,7 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
             if (Math.Abs(probe.DurationMs.Value - sourceDurationMs.Value) > tolerance)
             {
                 return OutputValidation.Fail(
-                    $"The prepared output duration {probe.DurationMs} ms differs from the source {sourceDurationMs} ms by more than {tolerance} ms.");
+                    $"The prepared output duration {probe.DurationMs} ms differs from the source {sourceDurationMs} ms by more than {tolerance} ms.", isContentFailure: true);
             }
         }
 

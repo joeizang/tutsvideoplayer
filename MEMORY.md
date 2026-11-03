@@ -9,3 +9,5 @@
 - Frame-timing checks must allow container timestamp quantization and floating-point rounding; verify CFR behavior with MP4, MKV, and WebM fixtures.
 - Playback leases must protect both file lifetime and media availability during rendition transitions, including subsequent range requests.
 - Refreshing probe metadata must reuse an established source digest when size/mtime hints still match; metadata upgrades alone must not trigger a full-library rehash.
+- A probe timeout or I/O failure is inconclusive, not proof of corrupt content; preserve working cached copies during transient validation failures.
+- Jobs blocked by playback leases need automatic recovery after lease release, and sessions must establish leases before the periodic heartbeat delay.

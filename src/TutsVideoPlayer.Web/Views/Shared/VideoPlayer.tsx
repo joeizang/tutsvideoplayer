@@ -48,6 +48,8 @@ export function VideoPlayer({
     const [selectedRenditionId, setSelectedRenditionId] = useState(manifest.readyDefaultRenditionId);
     const rendition = manifest.renditions.find((candidate) => candidate.id === selectedRenditionId && candidate.mediaUrl)
         ?? manifest.renditions.find((candidate) => candidate.mediaUrl);
+    const renditionIdRef = useRef(rendition?.id ?? null);
+    renditionIdRef.current = rendition?.id ?? null;
     const [switching, setSwitching] = useState<{ timeMs: number; wasPlaying: boolean } | null>(null);
     const [savedPositionMs, setSavedPositionMs] = useState(manifest.progress.positionMs);
     const [playing, setPlaying] = useState(false);
@@ -171,6 +173,16 @@ export function VideoPlayer({
         }
     }, [manifest.sourceGeneration]);
 
+    const sendHeartbeat = useCallback(async () => {
+        const sessionId = sessionRef.current;
+        if (!sessionId) return;
+        await fetch(`/api/v1/playback-sessions/${sessionId}/heartbeat`, {
+            method: "POST",
+            headers: REQUEST_HEADERS,
+            body: JSON.stringify({ activeRenditionId: renditionIdRef.current })
+        });
+    }, []);
+
     const startSession = useCallback(async () => {
         try {
             const response = await fetch(`/api/v1/lessons/${manifest.lessonId}/playback-sessions`, {
@@ -186,6 +198,7 @@ export function VideoPlayer({
 
             const started = await response.json();
             sessionRef.current = started.sessionId;
+            void sendHeartbeat().catch(() => undefined);
             sequenceRef.current = started.lastSequence;
             closingRef.current = false;
             setCompletionRevision(started.progressRevision);
@@ -209,7 +222,7 @@ export function VideoPlayer({
             setStale("no-session");
             setStaleMessage("A playback session could not be started. Your position is not being saved.");
         }
-    }, [manifest.lessonId]);
+    }, [manifest.lessonId, sendHeartbeat]);
 
     /**
      * Final flush for navigation and page lifecycle. A keepalive fetch is used rather than
@@ -256,21 +269,13 @@ export function VideoPlayer({
     }, [closeSession]);
 
     useEffect(() => {
+        // Establish the new rendition's lease immediately, including source switches.
+        void sendHeartbeat().catch(() => undefined);
         const heartbeat = window.setInterval(() => {
-            const sessionId = sessionRef.current;
-            if (!sessionId || document.hidden) {
-                return;
-            }
-
-            fetch(`/api/v1/playback-sessions/${sessionId}/heartbeat`, {
-                method: "POST",
-                headers: REQUEST_HEADERS,
-                body: JSON.stringify({ activeRenditionId: rendition?.id ?? null })
-            }).catch(() => undefined);
+            if (!document.hidden) void sendHeartbeat().catch(() => undefined);
         }, HEARTBEAT_MS);
-
         return () => window.clearInterval(heartbeat);
-    }, [rendition?.id]);
+    }, [rendition?.id, sendHeartbeat]);
 
     useEffect(() => {
         const progressTimer = window.setInterval(() => {

@@ -82,11 +82,11 @@ public sealed class VfrPreparationTests : IAsyncLifetime
         db.ChangeTracker.Clear();
     }
 
-    private PreparationExecutor Executor()
+    private PreparationExecutor Executor(FFprobeAdapter? overrideProbe = null, string ffmpeg = "ffmpeg")
     {
         var options = Options.Create(new AppOptions { LibraryRoot = root, DataDirectory = root });
         return new PreparationExecutor(db, options, Options.Create(new PreparationOptions { DiskReserveBytes = 0 }),
-            probe, new FFmpegAdapter("ffmpeg"), new PreparedOutputValidator(probe),
+            overrideProbe ?? probe, new FFmpegAdapter(ffmpeg), new PreparedOutputValidator(overrideProbe ?? probe),
             new CacheAccounting(db, options), new CacheEvictionService(db, options, NullLogger<CacheEvictionService>.Instance),
             NullLogger<PreparationExecutor>.Instance);
     }
@@ -144,12 +144,14 @@ public sealed class VfrPreparationTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData(false, false, false)]
-    [InlineData(true, false, false)]
-    [InlineData(true, true, false)]
-    [InlineData(false, true, false)]
-    [InlineData(true, false, true)]
-    public async Task ScanRequeuesOldCopiesAndExecutorDoesNotAdoptThem(bool quality, bool leased, bool alreadyStale)
+    [InlineData(false, false, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, false, true, true)]
+    [InlineData(true, true, true, false)]
+    public async Task ScanRequeuesOldCopiesAndExecutorDoesNotAdoptThem(bool quality, bool leased, bool alreadyStale, bool missing)
     {
         var source = await CreateSourceAsync();
         await ScanAsync();
@@ -202,6 +204,7 @@ public sealed class VfrPreparationTests : IAsyncLifetime
                 DedupKey = "historical-duplicate", State = PreparationJobState.Succeeded });
         }
         await db.SaveChangesAsync(Token);
+        if (missing) File.Delete(outputPath);
         var scanStarted = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         await ScanAsync();
         oldJob = await db.PreparationJobs.SingleAsync(j => j.Id == oldJob.Id, Token);
@@ -221,8 +224,17 @@ public sealed class VfrPreparationTests : IAsyncLifetime
             Assert.True(File.Exists(outputPath));
             Assert.IsType<PhysicalFileResult>(await MediaController().Get(oldCopy.Id, Token));
             session = await db.PlaybackSessions.SingleAsync(s => s.Id == session!.Id, Token);
-            session.ClosedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            oldJob.State = PreparationJobState.Running; // The learner retries and the worker claims again.
+            await PreparationScheduler.ResumeReleasedPlaybackJobsAsync(db,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs, Token);
+            Assert.Equal(PreparationJobState.Blocked, oldJob.State);
+            if (alreadyStale)
+                session.LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs - 1;
+            else session.ClosedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            await db.SaveChangesAsync(Token);
+            await PreparationScheduler.ResumeReleasedPlaybackJobsAsync(db,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs, Token);
+            Assert.Equal(PreparationJobState.Queued, oldJob.State);
+            oldJob.State = PreparationJobState.Running; // The worker claims the automatically resumed job.
             await db.SaveChangesAsync(Token);
             Assert.IsType<ObjectResult>(await MediaController().Get(oldCopy.Id, Token));
         }
@@ -375,6 +387,59 @@ public sealed class VfrPreparationTests : IAsyncLifetime
         Assert.DoesNotContain("Close active playback", result.Message);
         Assert.True(File.Exists(Path.Combine(root, relative)));
         Assert.Equal(RenditionStatus.Stale, copy.Status);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingStaleQualityCopyCanBeRetired(bool missingDirectory)
+    {
+        await CreateSourceAsync();
+        await ScanAsync();
+        var lesson = await db.Lessons.SingleAsync(Token);
+        var relative = ".tutsvideoplayer/quality/missing/output.mp4";
+        if (!missingDirectory) Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(root, relative))!);
+        var copy = new RenditionEntity { LessonId = lesson.Id, SourceGeneration = 1,
+            Purpose = RenditionPurpose.Quality, RetentionClass = RenditionRetention.Quality,
+            Status = RenditionStatus.Stale, RelativePath = relative, ByteLength = 100 };
+        db.Renditions.Add(copy);
+        await db.SaveChangesAsync(Token);
+        var options = Options.Create(new AppOptions { LibraryRoot = root, DataDirectory = root });
+        var result = await new CacheEvictionService(db, options, NullLogger<CacheEvictionService>.Instance).TryEvictStaleAsync(copy, Token);
+        Assert.True(result.Success, result.ErrorCode);
+        Assert.Equal(RenditionStatus.Evicted, copy.Status);
+        Assert.Equal(0, await new CacheAccounting(db, options).GetChargeableQualityBytesAsync(Token));
+    }
+
+    [Fact]
+    public async Task TemporaryValidationFailurePreservesReadyQualityCopy()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        await CreateSourceAsync(rate: "15");
+        await ScanAsync();
+        var lesson = await db.Lessons.SingleAsync(Token);
+        await QualityScheduling.QueueQualityForLessonAsync(db, lesson.Id, "480", Token);
+        var job = await db.PreparationJobs.SingleAsync(Token);
+        job.State = PreparationJobState.Running;
+        job.Attempt = 1;
+        await db.SaveChangesAsync(Token);
+        Assert.Equal(PreparationJobState.Succeeded, (await Executor().ExecuteAsync(job.Id, Token)).FinalState);
+        var copy = await db.Renditions.SingleAsync(r => r.Purpose == RenditionPurpose.Quality, Token);
+        var path = Path.Combine(root, copy.RelativePath);
+        var hash = PreparationArtifacts.Hash(path);
+        var wrapper = Path.Combine(root, "temporarily-failing-probe");
+        await File.WriteAllTextAsync(wrapper,
+            "#!/bin/sh\nfor arg do case \"$arg\" in */.tutsvideoplayer/quality/*) exit 1;; esac; done\nexec ffprobe \"$@\"\n", Token);
+        File.SetUnixFileMode(wrapper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        job.State = PreparationJobState.Running;
+        job.Attempt = 1;
+        await db.SaveChangesAsync(Token);
+        var result = await Executor(new FFprobeAdapter(wrapper), "does-not-exist").ExecuteAsync(job.Id, Token);
+        Assert.NotEqual(PreparationJobState.Succeeded, result.FinalState);
+        Assert.True(File.Exists(path));
+        Assert.Equal(hash, PreparationArtifacts.Hash(path));
+        Assert.True(File.Exists(path + ".tvp.json"));
+        Assert.Equal(RenditionStatus.Ready, copy.Status);
     }
 
     [Fact]

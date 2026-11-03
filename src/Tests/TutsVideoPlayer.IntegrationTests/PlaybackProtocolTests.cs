@@ -340,6 +340,43 @@ public class PlaybackProtocolTests(TestApplication application)
         Assert.True(manifest.Preferences.Revision > 0);
     }
 
+    [Fact]
+    public async Task SessionLeasesDefaultRenditionBeforeFirstHeartbeat()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var client = CreateGuardedClient(application);
+        await application.EnsureCatalogScannedAsync();
+        using var scope = application.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var source = await db.Renditions.AsNoTracking().FirstAsync(r => r.Purpose == RenditionPurpose.Source
+            && r.RelativePath.StartsWith("RealCourse/") && r.Status == RenditionStatus.Ready, token);
+        var copy = new RenditionEntity { LessonId = source.LessonId, SourceGeneration = source.SourceGeneration,
+            Purpose = RenditionPurpose.Compatibility, RetentionClass = RenditionRetention.Permanent,
+            Status = RenditionStatus.Ready, RelativePath = source.RelativePath, ByteLength = source.ByteLength,
+            Width = source.Width, Height = source.Height, RecipeVersion = "initial-lease-regression" };
+        db.Renditions.Add(copy);
+        await db.SaveChangesAsync(token);
+        var started = await StartSessionAsync(client, source.LessonId.ToString());
+        try
+        {
+            var session = await db.PlaybackSessions.AsNoTracking().SingleAsync(s => s.Id == long.Parse(started.SessionId), token);
+            Assert.Equal(copy.Id, session.ActiveRenditionId);
+            await db.Entry(copy).ReloadAsync(token);
+            copy.Status = RenditionStatus.Stale;
+            copy.Revision++;
+            await db.SaveChangesAsync(token);
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"/media/renditions/{copy.Id}");
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 99);
+            Assert.Equal(HttpStatusCode.PartialContent, (await client.SendAsync(request, token)).StatusCode);
+        }
+        finally
+        {
+            await client.PostAsJsonAsync($"/api/v1/playback-sessions/{started.SessionId}/close", new SessionCloseModel(null, null), token);
+            db.Renditions.Remove(copy);
+            await db.SaveChangesAsync(token);
+        }
+    }
+
     [Theory]
     [InlineData(RenditionPurpose.Compatibility)]
     [InlineData(RenditionPurpose.Quality)]

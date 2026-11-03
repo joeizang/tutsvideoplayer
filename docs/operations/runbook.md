@@ -69,7 +69,7 @@ Pause the queue through the UI when necessary. The current job finishes; the nex
 
 SQLite-specific note: use a known-version script or migration tool/bundle; generic idempotent scripts are not supported. Investigate an abandoned migration lock only after proving no migration operation is active. See [persistence](../design/persistence.md).
 
-After upgrading the frame-rate recipes, run a library scan to refresh legacy probe metadata and schedule normalization of detected VFR sources. Existing CFR sources and prepared copies stay usable. Browser-compatible originals stay available while normalization is queued, blocked, or failed. If a preparation job is blocked because its outdated copy is in use, close that playback session and retry the job; the watched copy remains servable until the session closes. Cache path, ownership, and deletion failures report their own recovery instructions. The timestamp probe samples the first 30 seconds; later-only timing changes require further diagnosis.
+After upgrading the frame-rate recipes, run a library scan to refresh legacy probe metadata and schedule normalization of detected VFR sources. Existing CFR sources and prepared copies stay usable. Browser-compatible originals stay available while normalization is queued, blocked, or failed. If a preparation job waits for an outdated copy in use, the watched copy remains servable and the worker resumes preparation automatically after the session closes or its lease expires. Cache path, ownership, and deletion failures report their own recovery instructions. The timestamp probe samples the first 30 seconds; later-only timing changes require further diagnosis.
 
 ## Backup and transfer
 

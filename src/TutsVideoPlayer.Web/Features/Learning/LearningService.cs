@@ -186,10 +186,21 @@ public sealed class LearningService(AppDbContext context, Subtitles.SubtitleServ
 
         var progress = await GetOrStartProgressAsync(lesson, cancellationToken);
 
+        var preferences = await EnsurePreferencesAsync(cancellationToken);
+        var ready = await context.Renditions.Where(r => r.LessonId == lesson.Id
+            && r.SourceGeneration == lesson.SourceGeneration && r.Status == RenditionStatus.Ready)
+            .ToListAsync(cancellationToken);
+        var initialRendition = SelectDefaultRendition(ready, preferences.PreferredQuality);
+        if (initialRendition is not null)
+        {
+            initialRendition.LastAccessUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            initialRendition.Revision++;
+        }
         var session = new PlaybackSessionEntity
         {
             LessonId = lesson.Id,
             SourceGeneration = lesson.SourceGeneration,
+            ActiveRenditionId = initialRendition?.Id,
             StartedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             LastHeartbeatUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };

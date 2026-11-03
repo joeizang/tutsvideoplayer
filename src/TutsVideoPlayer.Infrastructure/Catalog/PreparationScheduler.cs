@@ -23,6 +23,24 @@ public static class PreparationScheduler
     public const string MissingCompanionCode = "missing-companion-audio";
     public const string UnsupportedSourceCode = "unsupported-source";
 
+    public static async Task ResumeReleasedPlaybackJobsAsync(
+        AppDbContext context, long leaseCutoffUtcMs, CancellationToken cancellationToken = default)
+    {
+        var released = await context.PreparationJobs.Where(job => job.State == PreparationJobState.Blocked
+            && job.ErrorCode == "outdated-copy-in-use"
+            && job.Lesson.Availability == CatalogAvailability.Available
+            && job.SourceGeneration == job.Lesson.SourceGeneration
+            && !context.PlaybackSessions.Any(session => session.ClosedUtcMs == null
+                && session.LastHeartbeatUtcMs >= leaseCutoffUtcMs
+                && context.Renditions.Any(r => r.Id == session.ActiveRenditionId
+                    && r.LessonId == job.LessonId && r.SourceGeneration == job.SourceGeneration
+                    && r.Purpose == job.Purpose
+                    && (job.Purpose != RenditionPurpose.Quality || r.Profile == job.Profile))))
+            .ToListAsync(cancellationToken);
+        foreach (var job in released) Requeue(job, job.RecipeVersion);
+        if (released.Count > 0) await context.SaveChangesAsync(cancellationToken);
+    }
+
     public static async Task ScheduleCompatibilityJobsAsync(
         AppDbContext context,
         long libraryId,
