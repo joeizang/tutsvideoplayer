@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using TutsVideoPlayer.Core.Preparation;
 using TutsVideoPlayer.Infrastructure.Media;
+using TutsVideoPlayer.Infrastructure.Catalog;
 using System.Globalization;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Library;
@@ -72,6 +73,8 @@ public sealed class PreparationWorker(
                     continue;
                 }
 
+                await PreparationScheduler.ResumeReleasedPlaybackJobsAsync(context,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs, stoppingToken);
                 var claimed = await ClaimNextAsync(context, stoppingToken);
                 if (claimed is null)
                 {

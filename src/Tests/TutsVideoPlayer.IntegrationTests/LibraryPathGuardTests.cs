@@ -34,6 +34,23 @@ public sealed class LibraryPathGuardTests : IDisposable
     }
 
     [Fact]
+    public void MissingDestinationsRequireExplicitOptInAndRemainContained()
+    {
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "Missing/output.mp4", out _));
+        Assert.True(LibraryPathGuard.TryResolveWithin(_root, "Missing/output.mp4", out var destination, allowMissing: true));
+        Assert.StartsWith(_root, destination, StringComparison.Ordinal);
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "Course/Section", out _, allowMissing: true));
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "../escape.mp4", out _, allowMissing: true));
+        if (OperatingSystem.IsWindows()) return;
+        Directory.CreateSymbolicLink(Path.Combine(_root, "Escape"), _outside);
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "Escape/missing.mp4", out _, allowMissing: true));
+        Directory.CreateSymbolicLink(Path.Combine(_root, "Dangling"), Path.Combine(_outside, "missing"));
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "Dangling/output.mp4", out _, allowMissing: true));
+        File.CreateSymbolicLink(Path.Combine(_root, "dangling.mp4"), Path.Combine(_outside, "missing.mp4"));
+        Assert.False(LibraryPathGuard.TryResolveWithin(_root, "dangling.mp4", out _, allowMissing: true));
+    }
+
+    [Fact]
     public void TraversalOutsideTheRootIsRejected()
     {
         Assert.False(LibraryPathGuard.TryResolveWithin(_root, "../escape.mp4", out _));

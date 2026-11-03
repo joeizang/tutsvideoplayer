@@ -67,7 +67,7 @@ public static class QualityProfiles
     }
 
     public static string RecipeVersionFor(string profile) =>
-        $"quality-{profile.ToLowerInvariant()}-v1";
+        $"quality-{profile.ToLowerInvariant()}-v2";
 
     /// <summary>An honest, dimension-aware label for a rendition.</summary>
     public static string LabelFor(string? profile, int? width, int? height)

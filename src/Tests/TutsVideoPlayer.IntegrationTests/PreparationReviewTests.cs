@@ -46,6 +46,7 @@ public sealed class PreparationReviewTests : IAsyncLifetime
             RelativePath = lesson.PrimaryRelativePath, ProbeMetadata = "{\"VideoCodec\":\"h264\",\"AudioCodec\":\"aac\",\"DurationMs\":10000}" });
         db.Lessons.Add(lesson); await db.SaveChangesAsync(Token);
         job = new PreparationJobEntity { LessonId = lesson.Id, SourceGeneration = 1,
+            Purpose = RenditionPurpose.Compatibility,
             DedupKey = PreparationScheduler.DedupKeyFor(lesson.Id, 1), RecipeVersion = PreparationRecipes.WmvVersion,
             State = PreparationJobState.Running, Attempt = 1 };
         db.PreparationJobs.Add(job); await db.SaveChangesAsync(Token);

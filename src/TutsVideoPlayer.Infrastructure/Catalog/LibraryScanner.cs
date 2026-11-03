@@ -270,6 +270,7 @@ public sealed class LibraryScanner(
             // so repairing ffprobe has to actually recover duration and codec discovery.
             var videoNeedsInspection = !videoHintsMatch
                 || currentVideo!.ProbeMetadata is null
+                || ParseProbeMetadata(currentVideo.ProbeMetadata)?.IsVariableFrameRate is null
                 || currentVideo.Sha256 is null;
 
             if (videoNeedsInspection)
@@ -288,7 +289,9 @@ public sealed class LibraryScanner(
                         probe.Error ?? "The media file could not be probed."));
                 }
 
-                var digest = await ContentFingerprint.ComputeAsync(absolutePath, cancellationToken);
+                var digest = !videoHintsMatch || currentVideo?.Sha256 is null
+                    ? await ContentFingerprint.ComputeAsync(absolutePath, cancellationToken)
+                    : currentVideo.Sha256;
                 if (digest is null)
                 {
                     issueBuffer.Add(new LibraryEnumerationIssue(
@@ -601,10 +604,12 @@ public sealed class LibraryScanner(
 
             var probedThisScan = discovered.Lessons.GetValueOrDefault(lesson.PrimaryRelativePath)?.Probe;
             var probe = probedThisScan is not null
-                ? new ProbeMetadata(probedThisScan.DurationMs, probedThisScan.VideoCodec, probedThisScan.AudioCodec, probedThisScan.Width, probedThisScan.Height)
+                ? probedThisScan.ToMetadata()
                 : ParseProbeMetadata(videoComponent.ProbeMetadata);
 
             var containerCompatible = IsBrowserCompatibleContainer(lesson.PrimaryRelativePath);
+            // Keep browser-compatible sources available while normalization is queued,
+            // blocked, or failed. Ready permanent copies win default selection.
             var status = !containerCompatible
                 ? RenditionStatus.Pending
                 : probe is not null
@@ -1029,7 +1034,7 @@ public sealed class LibraryScanner(
         probe is null
             ? null
             : JsonSerializer.Serialize(
-                new ProbeMetadata(probe.DurationMs, probe.VideoCodec, probe.AudioCodec, probe.Width, probe.Height),
+                probe.ToMetadata(),
                 ProbeJsonOptions);
 
     private sealed record Discovery(

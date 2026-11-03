@@ -11,9 +11,15 @@ public sealed record MediaProbeResult(
     string? AudioCodec,
     int? Width,
     int? Height,
-    string? Error)
+    string? Error,
+    string? NominalFrameRate = null,
+    string? AverageFrameRate = null,
+    bool? IsVariableFrameRate = null)
 {
     public static MediaProbeResult Failure(string error) => new(false, null, null, null, null, null, error);
+
+    public ProbeMetadata ToMetadata() => new(DurationMs, VideoCodec, AudioCodec, Width, Height,
+        NominalFrameRate, AverageFrameRate, IsVariableFrameRate);
 }
 
 public sealed record ProbeMetadata(
@@ -21,7 +27,10 @@ public sealed record ProbeMetadata(
     string? VideoCodec,
     string? AudioCodec,
     int? Width,
-    int? Height);
+    int? Height,
+    string? NominalFrameRate = null,
+    string? AverageFrameRate = null,
+    bool? IsVariableFrameRate = null);
 
 public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
 {
@@ -49,6 +58,13 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
         startInfo.ArgumentList.Add("json");
         startInfo.ArgumentList.Add("-show_format");
         startInfo.ArgumentList.Add("-show_streams");
+        // Packet timestamps avoid decoding entire lessons. Bound the sample so scans
+        // and output validation remain cheap even for multi-hour recordings.
+        startInfo.ArgumentList.Add("-read_intervals");
+        startInfo.ArgumentList.Add("%+30");
+        startInfo.ArgumentList.Add("-show_packets");
+        startInfo.ArgumentList.Add("-show_entries");
+        startInfo.ArgumentList.Add("format=duration:stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,time_base:packet=stream_index,pts_time");
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(absolutePath);
 
@@ -139,6 +155,10 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
         string? audioCodec = null;
         int? width = null;
         int? height = null;
+        string? nominalFrameRate = null;
+        string? averageFrameRate = null;
+        int? videoStreamIndex = null;
+        string? timeBase = null;
 
         if (root.TryGetProperty("streams", out var streams))
         {
@@ -155,6 +175,10 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
                     videoCodec = stream.TryGetProperty("codec_name", out var name) ? name.GetString() : null;
                     width = stream.TryGetProperty("width", out var w) && w.TryGetInt32(out var widthValue) ? widthValue : null;
                     height = stream.TryGetProperty("height", out var h) && h.TryGetInt32(out var heightValue) ? heightValue : null;
+                    nominalFrameRate = stream.TryGetProperty("r_frame_rate", out var nominal) ? nominal.GetString() : null;
+                    averageFrameRate = stream.TryGetProperty("avg_frame_rate", out var average) ? average.GetString() : null;
+                    videoStreamIndex = stream.TryGetProperty("index", out var index) && index.TryGetInt32(out var streamIndex) ? streamIndex : null;
+                    timeBase = stream.TryGetProperty("time_base", out var resolution) ? resolution.GetString() : null;
                 }
                 else if (codecType == "audio" && audioCodec is null)
                 {
@@ -168,6 +192,23 @@ public sealed class FFprobeAdapter(string ffprobePath, TimeSpan? timeout = null)
             return MediaProbeResult.Failure("No video stream was reported by ffprobe.");
         }
 
-        return new MediaProbeResult(true, durationMs, videoCodec, audioCodec, width, height, null);
+        var timestamps = new List<double>();
+        if (videoStreamIndex is not null && root.TryGetProperty("packets", out var packets))
+        {
+            foreach (var packet in packets.EnumerateArray())
+            {
+                if (packet.TryGetProperty("stream_index", out var index) && index.GetInt32() == videoStreamIndex
+                    && packet.TryGetProperty("pts_time", out var pts)
+                    && double.TryParse(pts.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var timestamp)
+                    && double.IsFinite(timestamp))
+                {
+                    timestamps.Add(timestamp);
+                }
+            }
+        }
+
+        var variable = FrameRatePolicy.HasIrregularTiming(timestamps, timeBase);
+        return new MediaProbeResult(true, durationMs, videoCodec, audioCodec, width, height, null,
+            nominalFrameRate, averageFrameRate, variable);
     }
 }

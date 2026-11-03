@@ -15,7 +15,7 @@ public static class LibraryPathGuard
     /// between the root and the file is therefore checked for a reparse point, which is the
     /// same rule the library enumerator applies when it refuses to descend into links.
     /// </remarks>
-    public static bool TryResolveWithin(string root, string relativePath, out string fullPath)
+    public static bool TryResolveWithin(string root, string relativePath, out string fullPath, bool allowMissing = false)
     {
         fullPath = string.Empty;
 
@@ -44,14 +44,23 @@ public static class LibraryPathGuard
             return false;
         }
 
-        if (ContainsLinkBelowRoot(trimmedRoot, candidate))
+        if (ContainsLinkBelowRoot(trimmedRoot, candidate, allowMissing))
         {
             return false;
         }
 
-        var info = new FileInfo(candidate);
-        if (!info.Exists || info.LinkTarget is not null)
+        try
         {
+            var attributes = File.GetAttributes(candidate);
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0) return false;
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            if (!allowMissing) return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // An inaccessible path is not evidence that its file has disappeared.
             return false;
         }
 
@@ -88,7 +97,7 @@ public static class LibraryPathGuard
     /// Returns true when any directory strictly between the root and the candidate file is a
     /// reparse point (symbolic link, junction or mount point).
     /// </summary>
-    private static bool ContainsLinkBelowRoot(string root, string candidate)
+    private static bool ContainsLinkBelowRoot(string root, string candidate, bool allowMissing)
     {
         var directory = Path.GetDirectoryName(candidate);
 
@@ -100,7 +109,8 @@ public static class LibraryPathGuard
             try
             {
                 info = new DirectoryInfo(directory);
-                if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0)
+                if (info.LinkTarget is not null || (!allowMissing && !info.Exists)
+                    || (info.Exists && (info.Attributes & FileAttributes.ReparsePoint) != 0))
                 {
                     return true;
                 }

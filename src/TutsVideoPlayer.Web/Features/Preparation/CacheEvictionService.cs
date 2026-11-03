@@ -10,6 +10,7 @@ using TutsVideoPlayer.Web.Features.Library;
 namespace TutsVideoPlayer.Web.Features.Preparation;
 
 public sealed record EvictionOutcome(int EvictedCount, long ReclaimedBytes, long? PendingBytes);
+public sealed record StaleEvictionOutcome(bool Success, string? ErrorCode = null, string? Message = null);
 
 /// <summary>
 /// Two-phase cache eviction. Only Quality renditions are ever eligible — permanent copies
@@ -27,6 +28,44 @@ public sealed class CacheEvictionService(AppDbContext context, IOptions<AppOptio
     /// </summary>
     public static bool IsChargeable(RenditionStatus status) =>
         status is RenditionStatus.Ready or RenditionStatus.Stale;
+
+    /// <summary>Retire an outdated recipe before replacing its cache file.</summary>
+    public async Task<StaleEvictionOutcome> TryEvictStaleAsync(RenditionEntity rendition, CancellationToken cancellationToken)
+    {
+        if (rendition.RetentionClass != RenditionRetention.Quality || rendition.Status != RenditionStatus.Stale)
+            return new(false, "outdated-copy-changed", "The quality copy changed during preparation. Refresh the library and retry.");
+        if (!TryResolveManagedFile(rendition.RelativePath, out var path, allowMissing: true))
+            return new(false, "outdated-copy-unavailable", "The outdated quality copy is missing or outside the managed cache. Refresh the library and check cache paths and permissions.");
+        if (!File.Exists(path))
+        {
+            // There are no cache bytes left to protect or delete. Missing parents
+            // are allowed only after containment and all existing links are checked.
+            rendition.Status = RenditionStatus.Evicted;
+            rendition.Revision++;
+            await context.SaveChangesAsync(cancellationToken);
+            return new(true);
+        }
+        var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs;
+        if (await context.PlaybackSessions.AnyAsync(session => session.ActiveRenditionId == rendition.Id
+            && session.ClosedUtcMs == null && session.LastHeartbeatUtcMs >= cutoff, cancellationToken))
+            return new(false, "outdated-copy-in-use", "The outdated quality copy is being watched. Preparation will resume automatically when playback ends.");
+        if (!IsOwnedByThisApplication(rendition, path!))
+            return new(false, "outdated-copy-unowned", "The outdated quality copy could not be verified as application-owned. Check the cache file and its provenance before retrying.");
+
+        await EvictAsync(rendition, cancellationToken);
+        await context.Entry(rendition).ReloadAsync(cancellationToken);
+        if (rendition.Status != RenditionStatus.Evicted)
+            return new(false, "outdated-copy-changed", "The quality copy changed during preparation. Refresh the library and retry.");
+        if (File.Exists(path))
+        {
+            // A failed delete still consumes disk space and must remain retryable.
+            rendition.Status = RenditionStatus.Stale;
+            rendition.Revision++;
+            await context.SaveChangesAsync(cancellationToken);
+            return new(false, "outdated-copy-delete-failed", "The outdated quality copy could not be deleted. Check cache permissions and available storage, then retry.");
+        }
+        return new(true);
+    }
 
     public async Task<EvictionOutcome> EvictUntilUnderLimitAsync(long cacheLimitBytes, CancellationToken cancellationToken = default)
     {
@@ -246,7 +285,7 @@ public sealed class CacheEvictionService(AppDbContext context, IOptions<AppOptio
     /// or fails. Absolute paths are never accepted here — a managed artifact is always
     /// addressed relative to the library root.
     /// </summary>
-    private bool TryResolveManagedFile(string relativePath, out string? absolutePath)
+    private bool TryResolveManagedFile(string relativePath, out string? absolutePath, bool allowMissing = false)
     {
         absolutePath = null;
 
@@ -257,7 +296,7 @@ public sealed class CacheEvictionService(AppDbContext context, IOptions<AppOptio
             return false;
         }
 
-        if (!LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, relativePath, out var resolved))
+        if (!LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, relativePath, out var resolved, allowMissing))
         {
             return false;
         }

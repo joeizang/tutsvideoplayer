@@ -54,7 +54,7 @@ Use one replica. Include a generous graceful-stop period for FFmpeg shutdown and
 
 The known library should discover approximately the previously observed courses/videos, but current filesystem truth governs counts. Display unsupported/ambiguous files explicitly. Do not assert exact counts without a fresh scan.
 
-Automatic work initially includes recognized non-MP4/non-MKV videos. Preexisting valid managed outputs are reconciled first. One encoder can process the backlog over time while browsing and direct playback remain available. Show separate totals for queued, ready, blocked, and failed work; do not combine conversion completion with lessons watched.
+Automatic work includes recognized non-MP4/non-MKV videos and sources whose sampled video timestamps require CFR normalization, including MP4/MKV. Preexisting valid managed outputs are reconciled first. One encoder can process the backlog over time while browsing and direct playback remain available. Show separate totals for queued, ready, blocked, and failed work; do not combine conversion completion with lessons watched.
 
 Pause the queue through the UI when necessary. The current job finishes; the next does not start. Stopping the host may interrupt active work, which restarts after reconciliation. No byte-level continuation of partial encodes is promised.
 
@@ -68,6 +68,8 @@ Pause the queue through the UI when necessary. The current job finishes; the nex
 6. On failure, stop the new application and restore the backed-up data with the previous application version. Do not guess at a reverse migration that may discard history.
 
 SQLite-specific note: use a known-version script or migration tool/bundle; generic idempotent scripts are not supported. Investigate an abandoned migration lock only after proving no migration operation is active. See [persistence](../design/persistence.md).
+
+After upgrading the frame-rate recipes, run a library scan to refresh legacy probe metadata and schedule normalization of detected VFR sources. Existing CFR sources and prepared copies stay usable. Browser-compatible originals stay available while normalization is queued, blocked, or failed. If a preparation job waits for an outdated copy in use, the watched copy remains servable and the worker resumes preparation automatically after the session closes or its lease expires. Cache path, ownership, and deletion failures report their own recovery instructions. The timestamp probe samples the first 30 seconds; later-only timing changes require further diagnosis.
 
 ## Backup and transfer
 

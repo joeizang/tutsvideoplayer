@@ -15,13 +15,31 @@ namespace TutsVideoPlayer.Infrastructure.Catalog;
 /// <summary>
 /// Idempotent compatibility-job scheduling. Runs after every successful scan
 /// (and may run at any time) so a crash between discovery and scheduling fills
-/// its own gap. MP4/MKV are exempt from automatic scheduling; a missing
+/// its own gap. CFR MP4/MKV are exempt from automatic scheduling; a missing
 /// companion audio blocks the job until the prerequisite appears.
 /// </summary>
 public static class PreparationScheduler
 {
     public const string MissingCompanionCode = "missing-companion-audio";
     public const string UnsupportedSourceCode = "unsupported-source";
+
+    public static async Task ResumeReleasedPlaybackJobsAsync(
+        AppDbContext context, long leaseCutoffUtcMs, CancellationToken cancellationToken = default)
+    {
+        var released = await context.PreparationJobs.Where(job => job.State == PreparationJobState.Blocked
+            && job.ErrorCode == "outdated-copy-in-use"
+            && job.Lesson.Availability == CatalogAvailability.Available
+            && job.SourceGeneration == job.Lesson.SourceGeneration
+            && !context.PlaybackSessions.Any(session => session.ClosedUtcMs == null
+                && session.LastHeartbeatUtcMs >= leaseCutoffUtcMs
+                && context.Renditions.Any(r => r.Id == session.ActiveRenditionId
+                    && r.LessonId == job.LessonId && r.SourceGeneration == job.SourceGeneration
+                    && r.Purpose == job.Purpose
+                    && (job.Purpose != RenditionPurpose.Quality || r.Profile == job.Profile))))
+            .ToListAsync(cancellationToken);
+        foreach (var job in released) Requeue(job, job.RecipeVersion);
+        if (released.Count > 0) await context.SaveChangesAsync(cancellationToken);
+    }
 
     public static async Task ScheduleCompatibilityJobsAsync(
         AppDbContext context,
@@ -36,7 +54,7 @@ public static class PreparationScheduler
             .ToListAsync(cancellationToken);
 
         var jobs = await context.PreparationJobs
-            .Where(job => job.Lesson.Course.LibraryId == libraryId)
+            .Where(job => job.Lesson.Course.LibraryId == libraryId && job.Purpose == RenditionPurpose.Compatibility)
             .ToListAsync(cancellationToken);
         var jobsByLessonGeneration = jobs.ToDictionary(job => (job.LessonId, job.SourceGeneration));
 
@@ -72,11 +90,6 @@ public static class PreparationScheduler
         {
             var key = (lesson.Id, lesson.SourceGeneration);
 
-            if (jobsByLessonGeneration.ContainsKey(key) || validRenditionsByLesson.ContainsKey(key))
-            {
-                continue;
-            }
-
             var video = lesson.SourceComponents.FirstOrDefault(component =>
                 component.Generation == lesson.SourceGeneration && component.Role == SourceComponentRole.Video);
             var companion = lesson.SourceComponents.FirstOrDefault(component =>
@@ -88,7 +101,59 @@ public static class PreparationScheduler
             }
 
             var extension = Path.GetExtension(video.RelativePath).ToLowerInvariant();
-            if (extension is ".mp4" or ".mkv")
+            var probe = LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
+            var recipe = PreparationRecipes.Choose(new SourceSetInfo(video.RelativePath, video.RelativePath,
+                companion?.RelativePath, companion?.RelativePath, probe), out _);
+
+            if (probe?.IsVariableFrameRate == true)
+            {
+                // Recipe changes do not change source identity. Invalidate only copies
+                // of VFR sources; already-good CFR copies need no upgrade encode.
+                var outdated = permanentRenditions.Where(r => r.LessonId == lesson.Id
+                    && r.SourceGeneration == lesson.SourceGeneration && r.Status == RenditionStatus.Ready
+                    && r.RecipeVersion != recipe?.RecipeVersion).ToList();
+                foreach (var rendition in outdated)
+                {
+                    rendition.Status = RenditionStatus.Stale;
+                    rendition.Revision++;
+                    validRenditionsByLesson.Remove(key);
+                }
+                if (jobsByLessonGeneration.TryGetValue(key, out var previous)
+                    && previous.State is PreparationJobState.Succeeded or PreparationJobState.Failed
+                    && previous.RecipeVersion != recipe?.RecipeVersion)
+                {
+                    Requeue(previous, recipe!.RecipeVersion);
+                }
+
+                var qualityCopies = await context.Renditions.Where(r => r.LessonId == lesson.Id
+                    && r.SourceGeneration == lesson.SourceGeneration && r.Purpose == RenditionPurpose.Quality
+                    && (r.Status == RenditionStatus.Ready || r.Status == RenditionStatus.Stale)).ToListAsync(cancellationToken);
+                foreach (var copy in qualityCopies.Where(r => QualityProfiles.IsKnown(r.Profile)
+                    && r.RecipeVersion != QualityProfiles.RecipeVersionFor(r.Profile!)))
+                {
+                    if (copy.Status == RenditionStatus.Ready)
+                    {
+                        copy.Status = RenditionStatus.Stale;
+                        copy.Revision++;
+                    }
+                    await context.SaveChangesAsync(cancellationToken);
+                    // Also repair a crash between invalidation and scheduling, without
+                    // repeatedly retrying a new recipe that failed or was canceled.
+                    var prior = await context.PreparationJobs.AsNoTracking().Where(j =>
+                        j.LessonId == lesson.Id && j.SourceGeneration == lesson.SourceGeneration
+                        && j.Purpose == RenditionPurpose.Quality && j.Profile == copy.Profile)
+                        .OrderByDescending(j => j.Id).FirstOrDefaultAsync(cancellationToken);
+                    if (prior is null || prior.State == PreparationJobState.Succeeded
+                        || (prior.State == PreparationJobState.Failed
+                            && prior.RecipeVersion != QualityProfiles.RecipeVersionFor(copy.Profile!)))
+                    {
+                        await QualityScheduling.QueueQualityForLessonAsync(context, lesson.Id, copy.Profile!, cancellationToken);
+                    }
+                }
+            }
+
+            if (jobsByLessonGeneration.ContainsKey(key) || validRenditionsByLesson.ContainsKey(key)) continue;
+            if (extension is ".mp4" or ".mkv" && probe?.IsVariableFrameRate != true)
             {
                 continue;
             }
@@ -99,7 +164,6 @@ public static class PreparationScheduler
 
             if (extension is ".ts" or ".mts" or ".m2ts" && companion is null)
             {
-                var probe = LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
                 if (probe?.AudioCodec is null)
                 {
                     blocked = true;
@@ -107,8 +171,7 @@ public static class PreparationScheduler
                     message = "This MPEG-TS lesson has no companion audio file yet; preparation is blocked until it appears.";
                 }
             }
-            if (!blocked && PreparationRecipes.Choose(new SourceSetInfo(video.RelativePath, video.RelativePath,
-                    companion?.RelativePath, companion?.RelativePath, LibraryScanner.ParseProbeMetadata(video.ProbeMetadata)), out _) is null)
+            if (!blocked && recipe is null)
             {
                 blocked = true;
                 errorCode = UnsupportedSourceCode;
@@ -121,7 +184,7 @@ public static class PreparationScheduler
                 SourceGeneration = lesson.SourceGeneration,
                 DedupKey = DedupKeyFor(lesson.Id, lesson.SourceGeneration),
                 Purpose = RenditionPurpose.Compatibility,
-                RecipeVersion = RecipeVersionFor(extension),
+                RecipeVersion = recipe?.RecipeVersion ?? RecipeVersionFor(extension),
                 State = blocked ? PreparationJobState.Blocked : PreparationJobState.Queued,
                 Priority = 0,
                 EnqueuedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
@@ -156,13 +219,28 @@ public static class PreparationScheduler
             }
         }
 
+        await context.SaveChangesAsync(cancellationToken);
         if (created > 0 || unblocked > 0)
         {
-            await context.SaveChangesAsync(cancellationToken);
             logger.LogInformation(
                 "Preparation scheduling created {Created} job(s) and unblocked {Unblocked}.",
                 created, unblocked);
         }
+    }
+
+    internal static void Requeue(PreparationJobEntity job, string recipeVersion)
+    {
+        job.State = PreparationJobState.Queued;
+        job.EnqueuedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        job.RecipeVersion = recipeVersion;
+        job.Attempt = 0;
+        job.Progress = null;
+        job.ErrorCode = null;
+        job.UserMessage = null;
+        job.LeaseOwner = null;
+        job.LeaseExpiresUtcMs = null;
+        job.ReservedBytes = null;
+        job.Revision++;
     }
 
     public static string DedupKeyFor(long lessonId, int sourceGeneration) =>
@@ -226,12 +304,16 @@ public static class QualityScheduling
             return new QualityQueueOutcome(false, false, "not-eligible", null);
         }
 
-        // An existing READY rendition with this profile means the work is done.
+        // CFR copies remain usable across the recipe upgrade. A VFR source needs
+        // a copy made by the normalization-aware recipe.
+        var recipeVersion = QualityProfiles.RecipeVersionFor(profile);
+        var needsNormalization = probe.IsVariableFrameRate == true;
         var ready = await context.Renditions.AsNoTracking()
             .AnyAsync(candidate => candidate.LessonId == lessonId
                 && candidate.SourceGeneration == lesson.SourceGeneration
                 && candidate.Purpose == RenditionPurpose.Quality
                 && candidate.Profile == profile
+                && (!needsNormalization || candidate.RecipeVersion == recipeVersion)
                 && candidate.Status == RenditionStatus.Ready, cancellationToken);
         if (ready)
         {
@@ -255,10 +337,7 @@ public static class QualityScheduling
             // A terminal job (Succeeded but its rendition was evicted, Failed, or
             // Canceled) is requeued rather than duplicated; the rendition state
             // was already checked above, so this re-preparation is warranted.
-            existing.State = PreparationJobState.Queued;
-            existing.ErrorCode = null;
-            existing.UserMessage = null;
-            existing.Revision++;
+            PreparationScheduler.Requeue(existing, recipeVersion);
             await context.SaveChangesAsync(cancellationToken);
             return new QualityQueueOutcome(true, false, null, existing.Id);
         }

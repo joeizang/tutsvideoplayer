@@ -21,7 +21,8 @@ Use bounded probe timeouts and treat unsupported/corrupt media as per-lesson iss
 
 | Input condition | Permanent playback recipe |
 | --- | --- |
-| MP4/MKV with playable browser support | Direct playback; no automatic compatibility job |
+| CFR MP4/MKV with playable browser support | Direct playback; no automatic compatibility job |
+| Source with sampled irregular video timestamps | Queue a permanent CFR H.264/AAC MP4 even when codecs already support stream copy; keep browser-compatible source playback available until it is ready |
 | MP4/MKV fails compatible playback | User-requested MP4 compatibility job, reused afterward |
 | Non-exempt container with compatible video/audio streams | Remux to MP4 when validation proves compatibility; avoid re-encoding |
 | WMV3/WMA2 source | Encode H.264 video and AAC audio into MP4 at native display size |
@@ -29,6 +30,12 @@ Use bounded probe timeouts and treat unsupported/corrupt media as per-lesson iss
 | Unsupported/corrupt source | Report failure and retain original; do not create a fake ready output |
 
 Initial software encoding profile: H.264 via a verified encoder such as libx264, yuv420p, native frame rate, quality-oriented CRF 18 with medium preset, AAC at 192 kbps for stereo when audio re-encoding is required. These settings are proposed baselines to validate on tutorial text, not guarantees of lossless output. Preserve stream copies when possible. Handle mono without unnecessary channel duplication. Verify encoder availability on both platforms; do not silently fall back to an untested GPU profile.
+
+Frame-rate probing records nominal and average rates plus a timing classification in the existing JSON metadata. Classification samples the first 30 seconds of video packet presentation timestamps, sorted to account for B-frame decode order, with tolerance for one tick of the video stream timebase plus floating-point rounding. This keeps constant-rate MKV/WebM and millisecond-timescale MP4 sources from being misclassified. A rate mismatch alone does not establish VFR. This bounded sample can miss timing changes that start later in a lesson.
+
+All video transcodes explicitly request CFR. VFR sources use the average rate, snapped to a nearby common rate, rather than the potentially much higher nominal rate. CFR sources retain their nominal rate, including 15 fps material. Remuxes remain stream copies only for sources without detected irregular timing. Output validation rejects sampled irregular timing when the recipe promises CFR.
+
+On the next library scan, legacy probe metadata is refreshed without changing source identity or rehashing sources whose verified digest and size/mtime hints remain valid. Outdated compatibility and quality copies of detected VFR sources become stale and are requeued with reset attempt counts. Existing CFR copies remain usable. Normalized permanent copies have recipe-specific filenames so an old remux can be retained without a collision. Outdated quality copies are retired through managed cache eviction before replacement; live playback leases defer replacement until playback ends or the lease expires, at which point the worker automatically requeues the blocked job. Stale prepared copies remain servable to their existing live sessions while they are excluded from new playback selection. Browser-compatible sources remain available when normalization is queued, blocked, or failed. A vanished cache file is treated as retired after containment and symlink checks, so regeneration can proceed. Inconclusive probe or I/O failures preserve an existing ready quality copy; only confirmed content mismatches retire it. Sessions lease the default rendition at creation, and the player sends immediate heartbeats at startup and on rendition changes.
 
 Prepare MP4 for file-based streaming with metadata placed for prompt startup. FFmpeg distinguishes stream copying from transcoding and supports explicit input-stream mapping; its MP4 muxer documents fast-start behavior. Recipe details must be verified against the pinned FFmpeg build. [FFmpeg processing documentation](https://ffmpeg.org/ffmpeg.html), [MP4 format options](https://ffmpeg.org/ffmpeg-formats.html).
 

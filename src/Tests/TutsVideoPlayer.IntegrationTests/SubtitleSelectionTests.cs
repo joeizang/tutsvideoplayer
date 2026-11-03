@@ -50,6 +50,10 @@ public class SubtitleSelectionTests(TestApplication application)
         var tree = await GetTreeAsync(client, "CourseSubs");
         var video = tree.Nodes.First(node => node.Type == "lesson" && node.Filename!.EndsWith("video.mp4", StringComparison.Ordinal));
 
+        var automatic = await client.PutAsJsonAsync($"/api/v1/lessons/{video.Id}/subtitle-selection",
+            new SubtitleSelectionController.SelectionRequest(null), TestContext.Current.CancellationToken);
+        automatic.EnsureSuccessStatusCode();
+
         var candidates = await client.GetFromJsonAsync<SubtitleCandidatesModel>(
             $"/api/v1/lessons/{video.Id}/subtitle-candidates", TestContext.Current.CancellationToken);
 

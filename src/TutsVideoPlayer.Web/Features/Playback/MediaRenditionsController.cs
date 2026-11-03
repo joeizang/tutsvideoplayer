@@ -6,6 +6,7 @@ using TutsVideoPlayer.Core.Catalog;
 using TutsVideoPlayer.Infrastructure.FileSystem;
 using TutsVideoPlayer.Infrastructure.Persistence;
 using TutsVideoPlayer.Web.Features.Library;
+using TutsVideoPlayer.Web.Features.Preparation;
 
 namespace TutsVideoPlayer.Web.Features.Playback;
 
@@ -25,6 +26,8 @@ public sealed class MediaRenditionsController(AppDbContext context, IOptions<App
                 candidate.Status,
                 candidate.RelativePath,
                 candidate.ByteLength,
+                candidate.Purpose,
+                candidate.SourceGeneration,
                 LessonAvailable = candidate.Lesson.Availability == CatalogAvailability.Available
             })
             .SingleOrDefaultAsync(cancellationToken);
@@ -45,7 +48,13 @@ public sealed class MediaRenditionsController(AppDbContext context, IOptions<App
                 detail: "The lesson for this rendition is currently unavailable.");
         }
 
-        if (rendition.Status != RenditionStatus.Ready)
+        var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs;
+        var leasedPreparedCopy = rendition.Status == RenditionStatus.Stale
+            && rendition.Purpose != RenditionPurpose.Source
+            && await context.PlaybackSessions.AnyAsync(session => session.ActiveRenditionId == renditionId
+                && session.SourceGeneration == rendition.SourceGeneration
+                && session.ClosedUtcMs == null && session.LastHeartbeatUtcMs >= cutoff, cancellationToken);
+        if (rendition.Status != RenditionStatus.Ready && !leasedPreparedCopy)
         {
             return Problem(
                 statusCode: StatusCodes.Status409Conflict,
