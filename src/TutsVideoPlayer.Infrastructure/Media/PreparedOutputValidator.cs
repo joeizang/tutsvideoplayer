@@ -25,7 +25,8 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
         long? sourceDurationMs,
         string? expectedVideoCodec,
         string? expectedAudioCodec,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool requireConstantFrameRate = false)
     {
         var file = new FileInfo(outputPath);
         if (!file.Exists || file.Length == 0)
@@ -43,6 +44,11 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
         {
             return OutputValidation.Fail(
                 $"The prepared output video codec is {probe.VideoCodec ?? "unknown"}, expected {expectedVideoCodec ?? "h264"}.");
+        }
+
+        if (requireConstantFrameRate && probe.IsVariableFrameRate == true)
+        {
+            return OutputValidation.Fail("The prepared output still has irregular video frame timing.");
         }
 
         if (expectedAudioCodec is not null && probe.AudioCodec != expectedAudioCodec)
@@ -65,7 +71,7 @@ public sealed class PreparedOutputValidator(FFprobeAdapter probeAdapter)
         return new OutputValidation(
             true,
             null,
-            new ProbeMetadata(probe.DurationMs, probe.VideoCodec, probe.AudioCodec, probe.Width, probe.Height),
+            probe.ToMetadata(),
             file.Length,
             hash);
     }

@@ -28,6 +28,22 @@ public sealed class CacheEvictionService(AppDbContext context, IOptions<AppOptio
     public static bool IsChargeable(RenditionStatus status) =>
         status is RenditionStatus.Ready or RenditionStatus.Stale;
 
+    /// <summary>Retire an outdated recipe before replacing its cache file.</summary>
+    public async Task<bool> TryEvictStaleAsync(RenditionEntity rendition, CancellationToken cancellationToken)
+    {
+        if (rendition.RetentionClass != RenditionRetention.Quality || rendition.Status != RenditionStatus.Stale)
+            return false;
+        if (!TryResolveManagedFile(rendition.RelativePath, out var path)) return false;
+        var cutoff = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - CacheAccounting.LeaseGraceMs;
+        if (await context.PlaybackSessions.AnyAsync(session => session.ActiveRenditionId == rendition.Id
+            && session.ClosedUtcMs == null && session.LastHeartbeatUtcMs >= cutoff, cancellationToken))
+            return false;
+
+        await EvictAsync(rendition, cancellationToken);
+        await context.Entry(rendition).ReloadAsync(cancellationToken);
+        return rendition.Status == RenditionStatus.Evicted && !File.Exists(path);
+    }
+
     public async Task<EvictionOutcome> EvictUntilUnderLimitAsync(long cacheLimitBytes, CancellationToken cancellationToken = default)
     {
         var reclaimed = 0L;

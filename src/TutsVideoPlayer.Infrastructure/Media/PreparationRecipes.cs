@@ -7,7 +7,8 @@ public sealed record PreparationRecipe(
     string OutputExtension,
     IReadOnlyList<string> Arguments,
     string? ExpectedAudioCodec,
-    bool RequiresCompanionAudio);
+    bool RequiresCompanionAudio,
+    bool RequiresConstantFrameRate = false);
 
 public sealed record SourceSetInfo(
     string PrimaryRelativePath,
@@ -18,7 +19,9 @@ public sealed record SourceSetInfo(
 
 public static class PreparationRecipes
 {
-    public const string WmvVersion = "wmv-h264-v1";
+    public const string WmvVersion = "wmv-h264-v2";
+    public const string CompatibilityVersion = "compat-h264-v2";
+    public const string NormalizationVersion = "cfr-h264-v1";
     public const string TsAacVersion = "tsaac-mux-v1";
     public const string RemuxVersion = "remux-v1";
 
@@ -30,6 +33,22 @@ public static class PreparationRecipes
     {
         blockedReason = null;
         var extension = Path.GetExtension(source.PrimaryRelativePath).ToLowerInvariant();
+
+        // Normalization must precede stream-copy recipes, including H.264/AAC
+        // MP4 and split TS sources whose codecs are already browser-compatible.
+        if (source.Probe?.IsVariableFrameRate == true)
+        {
+            var arguments = new List<string> { "-i", source.PrimaryFullPath };
+            arguments.AddRange(source.CompanionFullPath is not null
+                ? ["-i", source.CompanionFullPath, "-map", "0:v:0", "-map", "1:a:0"]
+                : ["-map", "0:v:0", "-map", "0:a:0?"]);
+            arguments.AddRange(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]);
+            arguments.AddRange(FrameRatePolicy.EncoderArguments(source.Probe));
+            arguments.AddRange(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4", "-y", "{output}"]);
+            return new PreparationRecipe(NormalizationVersion, ".mp4", arguments,
+                source.CompanionFullPath is not null || source.Probe.AudioCodec is not null ? "aac" : null, false, true);
+        }
 
         if (extension is ".wmv")
         {
@@ -50,10 +69,11 @@ public static class PreparationRecipes
             [
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
+                .. FrameRatePolicy.EncoderArguments(source.Probe),
                 "-movflags", "+faststart",
                 "-f", "mp4", "-y", "{output}"
             ]);
-            return new PreparationRecipe(WmvVersion, ".mp4", arguments, source.CompanionFullPath is not null || source.Probe?.AudioCodec is not null ? "aac" : null, RequiresCompanionAudio: false);
+            return new PreparationRecipe(WmvVersion, ".mp4", arguments, source.CompanionFullPath is not null || source.Probe?.AudioCodec is not null ? "aac" : null, RequiresCompanionAudio: false, RequiresConstantFrameRate: true);
         }
 
         if (extension is ".ts" or ".mts" or ".m2ts")
@@ -119,12 +139,13 @@ public static class PreparationRecipes
         if (extension is ".mp4" or ".mkv" or ".m4v" or ".webm"
             && source.Probe?.VideoCodec is "h264" or "vp8" or "vp9" or "mpeg4")
         {
-            return new PreparationRecipe("compat-h264-v1", ".mp4",
+            return new PreparationRecipe(CompatibilityVersion, ".mp4",
                 ["-i", source.PrimaryFullPath, "-map", "0:v:0", "-map", "0:a:0?",
                  "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
                  "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:a", "aac", "-b:a", "192k",
+                 .. FrameRatePolicy.EncoderArguments(source.Probe),
                  "-movflags", "+faststart", "-f", "mp4", "-y", "{output}"],
-                source.Probe.AudioCodec is null ? null : "aac", false);
+                source.Probe.AudioCodec is null ? null : "aac", false, true);
         }
 
         blockedReason = "unsupported-source-container";

@@ -270,6 +270,7 @@ public sealed class LibraryScanner(
             // so repairing ffprobe has to actually recover duration and codec discovery.
             var videoNeedsInspection = !videoHintsMatch
                 || currentVideo!.ProbeMetadata is null
+                || ParseProbeMetadata(currentVideo.ProbeMetadata)?.IsVariableFrameRate is null
                 || currentVideo.Sha256 is null;
 
             if (videoNeedsInspection)
@@ -601,11 +602,11 @@ public sealed class LibraryScanner(
 
             var probedThisScan = discovered.Lessons.GetValueOrDefault(lesson.PrimaryRelativePath)?.Probe;
             var probe = probedThisScan is not null
-                ? new ProbeMetadata(probedThisScan.DurationMs, probedThisScan.VideoCodec, probedThisScan.AudioCodec, probedThisScan.Width, probedThisScan.Height)
+                ? probedThisScan.ToMetadata()
                 : ParseProbeMetadata(videoComponent.ProbeMetadata);
 
             var containerCompatible = IsBrowserCompatibleContainer(lesson.PrimaryRelativePath);
-            var status = !containerCompatible
+            var status = !containerCompatible || probe?.IsVariableFrameRate == true
                 ? RenditionStatus.Pending
                 : probe is not null
                     ? RenditionStatus.Ready
@@ -1029,7 +1030,7 @@ public sealed class LibraryScanner(
         probe is null
             ? null
             : JsonSerializer.Serialize(
-                new ProbeMetadata(probe.DurationMs, probe.VideoCodec, probe.AudioCodec, probe.Width, probe.Height),
+                probe.ToMetadata(),
                 ProbeJsonOptions);
 
     private sealed record Discovery(

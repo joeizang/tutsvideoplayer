@@ -95,7 +95,7 @@ public sealed class PreparationExecutor(
 
             var inspected = await probeAdapter.ProbeAsync(videoFullPath, cancellationToken);
             var probe = inspected.Success
-                ? new ProbeMetadata(inspected.DurationMs, inspected.VideoCodec, inspected.AudioCodec, inspected.Width, inspected.Height)
+                ? inspected.ToMetadata()
                 : LibraryScanner.ParseProbeMetadata(video.ProbeMetadata);
             var sourceSet = new SourceSetInfo(video.RelativePath, videoFullPath, companion?.RelativePath, companionFullPath, probe);
             var recipe = PreparationRecipes.Choose(sourceSet, out var blockedReason);
@@ -120,7 +120,9 @@ public sealed class PreparationExecutor(
             }
 
             var outputDirectory = Path.GetDirectoryName(videoFullPath)!;
-            var outputFileName = OutputFileNameFor(video.RelativePath, fingerprint);
+            var outputFileName = recipe.RecipeVersion == PreparationRecipes.NormalizationVersion
+                ? $"{Path.GetFileNameWithoutExtension(OutputFileNameFor(video.RelativePath, fingerprint))}-{recipe.RecipeVersion}.mp4"
+                : OutputFileNameFor(video.RelativePath, fingerprint);
             var outputFullPath = Path.Combine(outputDirectory, outputFileName);
             var manifestFullPath = Path.Combine(outputDirectory, ManifestFileNameFor(outputFileName));
             var temporaryFullPath = Path.Combine(outputDirectory, $".{outputFileName}.{job.Id.ToString(CultureInfo.InvariantCulture)}.part");
@@ -191,7 +193,7 @@ public sealed class PreparationExecutor(
             }
 
             await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
-            var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", recipe.ExpectedAudioCodec, cancellationToken);
+            var validation = await validator.ValidateAsync(temporaryFullPath, sourceDuration, "h264", recipe.ExpectedAudioCodec, cancellationToken, requireConstantFrameRate: recipe.RequiresConstantFrameRate);
             if (!validation.Success)
             {
                 File.Delete(temporaryFullPath);
@@ -394,6 +396,7 @@ public sealed class PreparationExecutor(
         CancellationToken cancellationToken)
     {
         var profile = job.Profile;
+        if (QualityProfiles.IsKnown(profile)) job.RecipeVersion = QualityProfiles.RecipeVersionFor(profile!);
         if (!QualityProfiles.IsKnown(profile))
         {
             return (null, await FailAsync(job, attempt, "unknown-profile", "The requested quality profile is not known.", permanent: true, cancellationToken));
@@ -430,8 +433,7 @@ public sealed class PreparationExecutor(
 
         // The quality branch is dispatched with no cached probe, so everything downstream —
         // progress, the audio decision and duration validation — has to use this one.
-        var sourceProbe = new ProbeMetadata(
-            qualityProbe.DurationMs, qualityProbe.VideoCodec, qualityProbe.AudioCodec, qualityProbe.Width, qualityProbe.Height);
+        var sourceProbe = qualityProbe.ToMetadata();
         var (scaledWidth, scaledHeight) = QualityProfiles.ScaledDimensions(sourceWidth.Value, sourceHeight.Value, targetHeight);
 
         return (new QualityPlan(profile!, sourceProbe, sourceWidth.Value, sourceHeight.Value, scaledWidth, scaledHeight), null);
@@ -455,6 +457,20 @@ public sealed class PreparationExecutor(
                 && candidate.SourceGeneration == job.SourceGeneration
                 && candidate.Purpose == RenditionPurpose.Quality
                 && candidate.Profile == profile, cancellationToken);
+        if (existing is not null && plan.SourceProbe.IsVariableFrameRate == true
+            && existing.RecipeVersion != QualityProfiles.RecipeVersionFor(profile)
+            && existing.Status is RenditionStatus.Ready or RenditionStatus.Stale)
+        {
+            existing.Status = RenditionStatus.Stale;
+            existing.Revision++;
+            await context.SaveChangesAsync(cancellationToken);
+            if (!await evictionService.TryEvictStaleAsync(existing, cancellationToken))
+            {
+                return await BlockAsync(job, attempt, "outdated-copy-in-use",
+                    "The outdated quality copy could not be retired. Close active playback and retry preparation.", cancellationToken);
+            }
+            return null;
+        }
         if (existing is null
             || existing.Status != RenditionStatus.Ready
             || !LibraryPathGuard.TryResolveWithin(appOptions.Value.LibraryRoot, existing.RelativePath, out var existingFullPath))
@@ -554,6 +570,7 @@ public sealed class PreparationExecutor(
             ? new[] { "-i", companionFullPath, "-map", "0:v:0", "-map", "1:a:0" }
             : new[] { "-map", "0:v:0", "-map", "0:a:0?" });
         arguments.AddRange(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]);
+        arguments.AddRange(FrameRatePolicy.EncoderArguments(plan.SourceProbe));
         arguments.AddRange(needsAudioTranscode || !hasAudio
             ? new[] { "-c:a", "aac", "-b:a", "192k" }
             : new[] { "-c:a", "copy" });
@@ -690,7 +707,7 @@ public sealed class PreparationExecutor(
         }
 
         await TransitionAsync(job, PreparationJobState.Validating, cancellationToken);
-        var validation = await validator.ValidateAsync(recipe.TemporaryFullPath, plan.SourceProbe.DurationMs, "h264", recipe.ExpectedAudioCodec, cancellationToken);
+        var validation = await validator.ValidateAsync(recipe.TemporaryFullPath, plan.SourceProbe.DurationMs, "h264", recipe.ExpectedAudioCodec, cancellationToken, requireConstantFrameRate: true);
         if (!validation.Success)
         {
             TryDeleteTemporary(recipe.TemporaryFullPath);
@@ -925,7 +942,7 @@ public sealed class PreparationExecutor(
         }
 
         rendition.Status = RenditionStatus.Ready;
-        rendition.RecipeVersion = QualityProfiles.RecipeVersionFor(profile);
+        rendition.RecipeVersion = job.RecipeVersion;
         rendition.RelativePath = RelativeToLibraryRoot(outputFullPath);
         rendition.ManifestPath = RelativeToLibraryRoot(manifestFullPath);
         rendition.Width = scaledWidth;
